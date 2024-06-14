@@ -43,9 +43,9 @@ fn main() -> Result {
     execute!(stdout(), EnterAlternateScreen)?;
     let mut i = 0;
     let mut center = (size.0 / 2, size.1 / 2);
-    let mut pendulum = Pendulum {
+    let mut pendulum = SinglePendulum {
         theta: 1.0,
-        velocity: 0.0,
+        vel: 0.0,
     };
     loop {
         let event = read()?;
@@ -54,7 +54,9 @@ fn main() -> Result {
                 KeyCode::Esc => break,
                 _ => println!("meow"),
             },
-            Event::Resize(width,height) => 
+            Event::Resize(width, height) => {
+                todo!()
+            }
             _ => todo!(),
         }
         single_pendulum(&mut pendulum, SingleParams::default());
@@ -64,14 +66,23 @@ fn main() -> Result {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct Pendulum {
+struct SinglePendulum {
     theta: f64,
-    velocity: f64,
+    vel: f64,
 }
-fn single_pendulum(pendulum: &mut Pendulum, params: SingleParams) {
-    pendulum.theta += pendulum.velocity * params.dt;
-    pendulum.velocity -= (params.gravity / params.length) * f64::sin(pendulum.theta) * params.dt;
+fn single_pendulum(pendulum: &mut SinglePendulum, params: SingleParams) {
+    pendulum.theta += pendulum.vel * params.dt;
+    pendulum.vel -= (params.gravity / params.length) * f64::sin(pendulum.theta) * params.dt;
 }
+
+struct DoublePendulum {
+    theta1: f64,
+    vel1: f64,
+    theta2: f64,
+    vel2: f64,
+}
+
+fn double_pendulum(pendulum: &mut DoublePendulum, params: DoubleParams) {}
 
 fn draw_line((x1, y1): (i16, i16), (x2, y2): (i16, i16)) {
     todo!()
