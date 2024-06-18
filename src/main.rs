@@ -32,7 +32,7 @@ fn main() -> Result {
     let mut center = (size.0 / 2, size.1 / 2);
     let mut pendulum = Pendulum {
         thetas: vec![1.0; 1],
-        vels: vec![1.2; 1],
+        vels: vec![1000.0; 1],
     };
     let params = Params {
         lengths: vec![1.0; 10],
@@ -51,7 +51,7 @@ fn main() -> Result {
                 //TODO keybinds for:
                 // add pendulum
                 // remove pendulum
-                // select mass, selected mass should be red
+                // select mass, selected mass should be red, after selected can change mass, angle
                 // play/pause: can be implemented with simple if statement
                 Event::Key(e) => {
                     if let KeyCode::Esc = e.code {
@@ -65,6 +65,9 @@ fn main() -> Result {
                 _ => continue,
             }
         }
+
+        //todo instead of single pedulum calculations inside of main, instead make generalized n-ulum function & draw-pendulum function
+        // they need to be INDEPENDENT, because if its paused, calculation shouldn't run, but pendulum should still be modifiable
         single_pendulum(&mut pendulum, &params);
         let (x, y) = calc_coords(vec![params.lengths[0]], vec![pendulum.thetas[0]], params.n);
         let (new_x, new_y) = rescaled_coords(x, y, 2.0, get_dimensions(5)?);
@@ -103,7 +106,7 @@ fn calc_coords(l: Vec<f64>, theta: Vec<f64>, n: usize) -> (f64, f64) {
 //TODO draw_circle
 
 //TODO draw_pendulum
-// passes in a pendulum, with
+// passes in a pendulum, with an optional selected N, and a length, draws lines between origin and pendulums until it meows
 
 fn draw_line((mut x1, mut y1): (i16, i16), (x2, y2): (i16, i16)) {
     let dx = (x2 - x1).abs();
