@@ -1,60 +1,45 @@
 use crossterm::{
     cursor::MoveTo,
-    event::{self, poll, read, Event, KeyCode, KeyEvent, KeyEventKind},
+    event::{poll, read, Event, KeyCode},
     execute,
-    style::{
-        Color, Print, PrintStyledContent, ResetColor, SetBackgroundColor, SetForegroundColor,
-        Stylize,
-    },
+    style::{PrintStyledContent, Stylize},
     terminal::{enable_raw_mode, size, Clear, EnterAlternateScreen},
-    ExecutableCommand,
 };
-use csv::Writer;
-use std::{
-    f64::consts::PI,
-    io::{stdout, Stdout, Write},
-    ops::Div,
-    time::Duration,
-};
+use std::{io::stdout, ops::Div, time::Duration};
 
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-struct SingleParams {
-    length: f64,
+struct Params {
+    lengths: Vec<f64>,
+    masses: Vec<f64>,
     gravity: f64,
     dt: f64,
-    margin: i32,
+    margin: i16,
 }
 
-impl Default for SingleParams {
-    fn default() -> Self {
-        SingleParams {
-            length: 1.0,
-            gravity: -9.81,
-            dt: 0.01,
-            margin: 5,
-        }
-    }
+struct Pendulum {
+    thetas: Vec<f64>,
+    vels: Vec<f64>,
 }
-struct DoubleParams {
-    length: (f64, f64),
-    gravity: f64,
-    dt: f64,
-    mass: (f64, f64),
-}
-
 fn main() -> Result {
     let size = size().unwrap();
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen)?;
-    let mut i = 0;
-    let mut center = (size.0 / 2, size.1 / 2);
-    let mut pendulum = SinglePendulum {
-        theta: 1.0,
-        vel: 0.0,
+    let mut _i = 0;
+    let center = (size.0 / 2, size.1 / 2);
+    let mut pendulum = Pendulum {
+        thetas: vec![1.0; 1],
+        vels: vec![5.0; 1],
+    };
+    let params = Params {
+        lengths: vec![1.0; 10],
+        masses: vec![1.0; 10],
+        gravity: -9.81,
+        dt: 0.001,
+        margin: 30,
     };
     loop {
-        if (poll(Duration::from_millis(100)))? {
+        if (poll(Duration::from_millis((1000.0 * params.dt).round() as u64)))? {
             let event = read()?;
             match event {
                 Event::Key(e) => {
@@ -62,35 +47,34 @@ fn main() -> Result {
                         break;
                     }
                 }
-                Event::Resize(width, height) => {
+                Event::Resize(_width, _height) => {
                     todo!()
                 }
                 _ => continue,
             }
         }
-        single_pendulum(&mut pendulum, SingleParams::default());
-        let (x, y) = calc_coords(vec![1.0], vec![pendulum.theta]);
+        single_pendulum(&mut pendulum, &params);
+        let (x, y) = calc_coords(vec![params.lengths[0]], vec![pendulum.thetas[0]]);
         let (new_x, new_y) = rescaled_coords(x, y, 2.0, get_dimensions(5)?);
         execute!(
             stdout(),
             Clear(crossterm::terminal::ClearType::All),
-            MoveTo(new_x as u16, new_y as u16),
+            MoveTo(new_x, new_y),
             PrintStyledContent("█".magenta())
         )?;
-        draw_line((center.0, center.1), (new_x, new_y));
-        i += 1
+        draw_line(
+            (center.0 as i16, center.1 as i16),
+            (new_x as i16, new_y as i16),
+        );
+        _i += 1
     }
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug)]
-struct SinglePendulum {
-    theta: f64,
-    vel: f64,
-}
-fn single_pendulum(pendulum: &mut SinglePendulum, params: SingleParams) {
-    pendulum.theta += pendulum.vel * params.dt;
-    pendulum.vel -= (params.gravity / params.length) * f64::sin(pendulum.theta) * params.dt;
+fn single_pendulum(pendulum: &mut Pendulum, params: &Params) {
+    pendulum.thetas[0] += pendulum.vels[0] * params.dt;
+    pendulum.vels[0] -=
+        (params.gravity / params.lengths[0]) * f64::sin(pendulum.thetas[0]) * params.dt;
 }
 
 //TODO, this needs to pass in an array, and do some funky junky maths
@@ -104,84 +88,42 @@ fn calc_coords(l: Vec<f64>, theta: Vec<f64>) -> (f64, f64) {
     (sum_x, sum_y)
 }
 
-// struct DoublePendulum {
-//     theta1: f64,
-//     vel1: f64,
-//     theta2: f64,
-//     vel2: f64,
-// }
-
-// fn double_pendulum(pendulum: &mut DoublePendulum, params: DoubleParams) {}
-
-fn draw_line((x1, y1): (u16, u16), (x2, y2): (u16, u16)) {
-    if u16::abs_diff(y1, y2) < u16::abs_diff(x1, x2) {
-        if x1 > x2 {
-            draw_line_low((x2, y2), (x1, y1));
-        } else {
-            draw_line_low((x1, y1), (x2, y2));
-        }
-    } else {
-        if y1 > y2 {
-            draw_line_high((x2, y2), (x1, y1));
-        } else {
-            draw_line_high((x1, y1), (x2, y2));
-        }
-    }
-}
-
-/// line drawing algorithm taken from wikipedia
-fn draw_line_high((x1, y1): (u16, u16), (x2, y2): (u16, u16)) {
-    let mut dx = x2 as i16 - x1 as i16;
-    let dy = y2 as i16 - y1 as i16;
-    let mut xi = 1;
-    if dx < 0 {
-        xi = -1;
-        dx = -dx;
-    }
-    let mut d = 2 * dx - dy;
-    let mut x = x1 as i16;
-    for y in y1..y2 {
+fn draw_line((mut x1, mut y1): (i16, i16), (x2, y2): (i16, i16)) {
+    let dx = (x2 - x1).abs();
+    let sx = if x1 < x2 { 1 } else { -1 };
+    let dy = -(y2 - y1).abs();
+    let sy = if y1 < y2 { 1 } else { -1 };
+    let mut error = dx + dy;
+    // mwa ha ha ha while true loop being used in an algorithm!!!!
+    loop {
         execute!(
             stdout(),
-            MoveTo(x as u16, y),
+            MoveTo(x1 as u16, y1 as u16),
             PrintStyledContent("█".magenta())
         )
         .unwrap();
-        if d > 0 {
-            x += xi;
-            d += 2 * (dx - dy);
-        } else {
-            d += 2 * dx;
+        if x1 == x2 && y1 == y2 {
+            break;
+        }
+        let e2 = 2 * error;
+        if e2 >= dy {
+            if x1 == x2 {
+                break;
+            };
+            error += dy;
+            x1 += sx;
+        }
+        if e2 <= dx {
+            if y1 == y2 {
+                break;
+            };
+            error += dx;
+            y1 += sy;
         }
     }
 }
 
-fn draw_line_low((x1, y1): (u16, u16), (x2, y2): (u16, u16)) {
-    let dx = x2 as i16 - x1 as i16;
-    let mut dy = y2 as i16 - y2 as i16;
-    let mut yi = 1;
-    if dy < 0 {
-        yi = -1;
-        dy = -dy;
-    }
-    let mut d = (2 * dy) - dx;
-    let mut y = y1 as i16;
-    for x in x1..x2 {
-        execute!(
-            stdout(),
-            MoveTo(x, y as u16),
-            PrintStyledContent("█".magenta())
-        )
-        .unwrap();
-        if d > 0 {
-            y += yi;
-            d += (2 * (dy - dx));
-        } else {
-            d += 2 * dy;
-        }
-    }
-}
-
+// helper function
 fn get_dimensions(margin: i16) -> Result<i16> {
     let (x, y) = size()?;
     let dimensions = if x < y {
@@ -195,9 +137,7 @@ fn get_dimensions(margin: i16) -> Result<i16> {
 // rescales the coordinates to the console dimensions, & returns the sanitized coordinates to be drawn in the console
 fn rescaled_coords(x: f64, y: f64, starting_max: f64, output_max: i16) -> (u16, u16) {
     let (m, e) = size().unwrap();
-    let x_scaled =
-        (((x / starting_max) * output_max as f64).round() as i16 + (m / 2) as i16) as u16;
-    let y_scaled =
-        (((y / starting_max) * output_max as f64).round() as i16 + (e / 2) as i16) as u16;
-    (x_scaled, y_scaled)
+    let o = (((x / starting_max) * output_max as f64).round() as i16 + (m / 2) as i16) as u16;
+    let w = (((y / starting_max) * output_max as f64).round() as i16 + (e / 2) as i16) as u16;
+    (o, w)
 }
