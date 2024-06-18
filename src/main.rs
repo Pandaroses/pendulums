@@ -15,6 +15,9 @@ struct Params {
     gravity: f64,
     dt: f64,
     margin: i16,
+    n: usize,
+    s: usize,
+    paused: bool,
 }
 
 struct Pendulum {
@@ -22,14 +25,14 @@ struct Pendulum {
     vels: Vec<f64>,
 }
 fn main() -> Result {
-    let size = size().unwrap();
+    let mut size: (u16, u16) = size().unwrap();
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen)?;
     let mut _i = 0;
-    let center = (size.0 / 2, size.1 / 2);
+    let mut center = (size.0 / 2, size.1 / 2);
     let mut pendulum = Pendulum {
         thetas: vec![1.0; 1],
-        vels: vec![5.0; 1],
+        vels: vec![1.2; 1],
     };
     let params = Params {
         lengths: vec![1.0; 10],
@@ -37,24 +40,33 @@ fn main() -> Result {
         gravity: -9.81,
         dt: 0.001,
         margin: 30,
+        n: 1,
+        s: 0,
+        paused: false,
     };
     loop {
         if (poll(Duration::from_millis((1000.0 * params.dt).round() as u64)))? {
             let event = read()?;
             match event {
+                //TODO keybinds for:
+                // add pendulum
+                // remove pendulum
+                // select mass, selected mass should be red
+                // play/pause: can be implemented with simple if statement
                 Event::Key(e) => {
                     if let KeyCode::Esc = e.code {
                         break;
                     }
                 }
-                Event::Resize(_width, _height) => {
-                    todo!()
+                Event::Resize(width, height) => {
+                    center = (width / 2, height / 2);
+                    continue;
                 }
                 _ => continue,
             }
         }
         single_pendulum(&mut pendulum, &params);
-        let (x, y) = calc_coords(vec![params.lengths[0]], vec![pendulum.thetas[0]]);
+        let (x, y) = calc_coords(vec![params.lengths[0]], vec![pendulum.thetas[0]], params.n);
         let (new_x, new_y) = rescaled_coords(x, y, 2.0, get_dimensions(5)?);
         execute!(
             stdout(),
@@ -71,22 +83,27 @@ fn main() -> Result {
     Ok(())
 }
 
+//replace with n_pendulum function
 fn single_pendulum(pendulum: &mut Pendulum, params: &Params) {
     pendulum.thetas[0] += pendulum.vels[0] * params.dt;
     pendulum.vels[0] -=
         (params.gravity / params.lengths[0]) * f64::sin(pendulum.thetas[0]) * params.dt;
 }
 
-//TODO, this needs to pass in an array, and do some funky junky maths
-fn calc_coords(l: Vec<f64>, theta: Vec<f64>) -> (f64, f64) {
-    let mut sum_x = 0.0;
-    let mut sum_y = 0.0;
-    for i in 0..l.len() {
-        sum_x += l[i] * f64::sin(theta[i]);
-        sum_y -= l[i] * f64::cos(theta[i])
+fn calc_coords(l: Vec<f64>, theta: Vec<f64>, n: usize) -> (f64, f64) {
+    let mut x = 0.0;
+    let mut y = 0.0;
+    for i in 0..n {
+        x += l[i] * f64::sin(theta[i]);
+        y -= l[i] * f64::cos(theta[i])
     }
-    (sum_x, sum_y)
+    (x, y)
 }
+
+//TODO draw_circle
+
+//TODO draw_pendulum
+// passes in a pendulum, with
 
 fn draw_line((mut x1, mut y1): (i16, i16), (x2, y2): (i16, i16)) {
     let dx = (x2 - x1).abs();
@@ -123,7 +140,6 @@ fn draw_line((mut x1, mut y1): (i16, i16), (x2, y2): (i16, i16)) {
     }
 }
 
-// helper function
 fn get_dimensions(margin: i16) -> Result<i16> {
     let (x, y) = size()?;
     let dimensions = if x < y {
@@ -134,7 +150,6 @@ fn get_dimensions(margin: i16) -> Result<i16> {
     Ok(dimensions)
 }
 
-// rescales the coordinates to the console dimensions, & returns the sanitized coordinates to be drawn in the console
 fn rescaled_coords(x: f64, y: f64, starting_max: f64, output_max: i16) -> (u16, u16) {
     let (m, e) = size().unwrap();
     let o = (((x / starting_max) * output_max as f64).round() as i16 + (m / 2) as i16) as u16;

@@ -1,0 +1,491 @@
+<?xml version="1.0" standalone="no"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"><svg version="1.1" width="1200" height="374" onload="init(evt)" viewBox="0 0 1200 374" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:fg="http://github.com/jonhoo/inferno"><!--Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples.--><!--NOTES: --><defs><linearGradient id="background" y1="0" y2="1" x1="0" x2="0"><stop stop-color="#eeeeee" offset="5%"/><stop stop-color="#eeeeb0" offset="95%"/></linearGradient></defs><style type="text/css">
+text { font-family:monospace; font-size:12px }
+#title { text-anchor:middle; font-size:17px; }
+#matched { text-anchor:end; }
+#search { text-anchor:end; opacity:0.1; cursor:pointer; }
+#search:hover, #search.show { opacity:1; }
+#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+#unzoom { cursor:pointer; }
+#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+.hide { display:none; }
+.parent { opacity:0.5; }
+</style><script type="text/ecmascript"><![CDATA[
+        var nametype = 'Function:';
+        var fontsize = 12;
+        var fontwidth = 0.59;
+        var xpad = 10;
+        var inverted = false;
+        var searchcolor = 'rgb(230,0,230)';
+        var fluiddrawing = true;
+        var truncate_text_right = false;
+    ]]><![CDATA["use strict";
+var details, searchbtn, unzoombtn, matchedtxt, svg, searching, frames, known_font_width;
+function init(evt) {
+    details = document.getElementById("details").firstChild;
+    searchbtn = document.getElementById("search");
+    unzoombtn = document.getElementById("unzoom");
+    matchedtxt = document.getElementById("matched");
+    svg = document.getElementsByTagName("svg")[0];
+    frames = document.getElementById("frames");
+    known_font_width = get_monospace_width(frames);
+    total_samples = parseInt(frames.attributes.total_samples.value);
+    searching = 0;
+
+    // Use GET parameters to restore a flamegraph's state.
+    var restore_state = function() {
+        var params = get_params();
+        if (params.x && params.y)
+            zoom(find_group(document.querySelector('[*|x="' + params.x + '"][y="' + params.y + '"]')));
+        if (params.s)
+            search(params.s);
+    };
+
+    if (fluiddrawing) {
+        // Make width dynamic so the SVG fits its parent's width.
+        svg.removeAttribute("width");
+        // Edge requires us to have a viewBox that gets updated with size changes.
+        var isEdge = /Edge\/\d./i.test(navigator.userAgent);
+        if (!isEdge) {
+            svg.removeAttribute("viewBox");
+        }
+        var update_for_width_change = function() {
+            if (isEdge) {
+                svg.attributes.viewBox.value = "0 0 " + svg.width.baseVal.value + " " + svg.height.baseVal.value;
+            }
+
+            // Keep consistent padding on left and right of frames container.
+            frames.attributes.width.value = svg.width.baseVal.value - xpad * 2;
+
+            // Text truncation needs to be adjusted for the current width.
+            update_text_for_elements(frames.children);
+
+            // Keep search elements at a fixed distance from right edge.
+            var svgWidth = svg.width.baseVal.value;
+            searchbtn.attributes.x.value = svgWidth - xpad;
+            matchedtxt.attributes.x.value = svgWidth - xpad;
+        };
+        window.addEventListener('resize', function() {
+            update_for_width_change();
+        });
+        // This needs to be done asynchronously for Safari to work.
+        setTimeout(function() {
+            unzoom();
+            update_for_width_change();
+            restore_state();
+        }, 0);
+    } else {
+        restore_state();
+    }
+}
+// event listeners
+window.addEventListener("click", function(e) {
+    var target = find_group(e.target);
+    if (target) {
+        if (target.nodeName == "a") {
+            if (e.ctrlKey === false) return;
+            e.preventDefault();
+        }
+        if (target.classList.contains("parent")) unzoom();
+        zoom(target);
+
+        // set parameters for zoom state
+        var el = target.querySelector("rect");
+        if (el && el.attributes && el.attributes.y && el.attributes["fg:x"]) {
+            var params = get_params()
+            params.x = el.attributes["fg:x"].value;
+            params.y = el.attributes.y.value;
+            history.replaceState(null, null, parse_params(params));
+        }
+    }
+    else if (e.target.id == "unzoom") {
+        unzoom();
+
+        // remove zoom state
+        var params = get_params();
+        if (params.x) delete params.x;
+        if (params.y) delete params.y;
+        history.replaceState(null, null, parse_params(params));
+    }
+    else if (e.target.id == "search") search_prompt();
+}, false)
+// mouse-over for info
+// show
+window.addEventListener("mouseover", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = nametype + " " + g_to_text(target);
+}, false)
+// clear
+window.addEventListener("mouseout", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = ' ';
+}, false)
+// ctrl-F for search
+window.addEventListener("keydown",function (e) {
+    if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+        e.preventDefault();
+        search_prompt();
+    }
+}, false)
+// functions
+function get_params() {
+    var params = {};
+    var paramsarr = window.location.search.substr(1).split('&');
+    for (var i = 0; i < paramsarr.length; ++i) {
+        var tmp = paramsarr[i].split("=");
+        if (!tmp[0] || !tmp[1]) continue;
+        params[tmp[0]]  = decodeURIComponent(tmp[1]);
+    }
+    return params;
+}
+function parse_params(params) {
+    var uri = "?";
+    for (var key in params) {
+        uri += key + '=' + encodeURIComponent(params[key]) + '&';
+    }
+    if (uri.slice(-1) == "&")
+        uri = uri.substring(0, uri.length - 1);
+    if (uri == '?')
+        uri = window.location.href.split('?')[0];
+    return uri;
+}
+function find_child(node, selector) {
+    var children = node.querySelectorAll(selector);
+    if (children.length) return children[0];
+    return;
+}
+function find_group(node) {
+    var parent = node.parentElement;
+    if (!parent) return;
+    if (parent.id == "frames") return node;
+    return find_group(parent);
+}
+function orig_save(e, attr, val) {
+    if (e.attributes["fg:orig_" + attr] != undefined) return;
+    if (e.attributes[attr] == undefined) return;
+    if (val == undefined) val = e.attributes[attr].value;
+    e.setAttribute("fg:orig_" + attr, val);
+}
+function orig_load(e, attr) {
+    if (e.attributes["fg:orig_"+attr] == undefined) return;
+    e.attributes[attr].value = e.attributes["fg:orig_" + attr].value;
+    e.removeAttribute("fg:orig_" + attr);
+}
+function g_to_text(e) {
+    var text = find_child(e, "title").firstChild.nodeValue;
+    return (text)
+}
+function g_to_func(e) {
+    var func = g_to_text(e);
+    // if there's any manipulation we want to do to the function
+    // name before it's searched, do it here before returning.
+    return (func);
+}
+function get_monospace_width(frames) {
+    // Given the id="frames" element, return the width of text characters if
+    // this is a monospace font, otherwise return 0.
+    text = find_child(frames.children[0], "text");
+    originalContent = text.textContent;
+    text.textContent = "!";
+    bangWidth = text.getComputedTextLength();
+    text.textContent = "W";
+    wWidth = text.getComputedTextLength();
+    text.textContent = originalContent;
+    if (bangWidth === wWidth) {
+        return bangWidth;
+    } else {
+        return 0;
+    }
+}
+function update_text_for_elements(elements) {
+    // In order to render quickly in the browser, you want to do one pass of
+    // reading attributes, and one pass of mutating attributes. See
+    // https://web.dev/avoid-large-complex-layouts-and-layout-thrashing/ for details.
+
+    // Fall back to inefficient calculation, if we're variable-width font.
+    // TODO This should be optimized somehow too.
+    if (known_font_width === 0) {
+        for (var i = 0; i < elements.length; i++) {
+            update_text(elements[i]);
+        }
+        return;
+    }
+
+    var textElemNewAttributes = [];
+    for (var i = 0; i < elements.length; i++) {
+        var e = elements[i];
+        var r = find_child(e, "rect");
+        var t = find_child(e, "text");
+        var w = parseFloat(r.attributes.width.value) * frames.attributes.width.value / 100 - 3;
+        var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+        var newX = format_percent((parseFloat(r.attributes.x.value) + (100 * 3 / frames.attributes.width.value)));
+
+        // Smaller than this size won't fit anything
+        if (w < 2 * known_font_width) {
+            textElemNewAttributes.push([newX, ""]);
+            continue;
+        }
+
+        // Fit in full text width
+        if (txt.length * known_font_width < w) {
+            textElemNewAttributes.push([newX, txt]);
+            continue;
+        }
+
+        var substringLength = Math.floor(w / known_font_width) - 2;
+        if (truncate_text_right) {
+            // Truncate the right side of the text.
+            textElemNewAttributes.push([newX, txt.substring(0, substringLength) + ".."]);
+            continue;
+        } else {
+            // Truncate the left side of the text.
+            textElemNewAttributes.push([newX, ".." + txt.substring(txt.length - substringLength, txt.length)]);
+            continue;
+        }
+    }
+
+    console.assert(textElemNewAttributes.length === elements.length, "Resize failed, please file a bug at https://github.com/jonhoo/inferno/");
+
+    // Now that we know new textContent, set it all in one go so we don't refresh a bazillion times.
+    for (var i = 0; i < elements.length; i++) {
+        var e = elements[i];
+        var values = textElemNewAttributes[i];
+        var t = find_child(e, "text");
+        t.attributes.x.value = values[0];
+        t.textContent = values[1];
+    }
+}
+
+function update_text(e) {
+    var r = find_child(e, "rect");
+    var t = find_child(e, "text");
+    var w = parseFloat(r.attributes.width.value) * frames.attributes.width.value / 100 - 3;
+    var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+    t.attributes.x.value = format_percent((parseFloat(r.attributes.x.value) + (100 * 3 / frames.attributes.width.value)));
+
+    // Smaller than this size won't fit anything
+    if (w < 2 * fontsize * fontwidth) {
+        t.textContent = "";
+        return;
+    }
+    t.textContent = txt;
+    // Fit in full text width
+    if (t.getComputedTextLength() < w)
+        return;
+    if (truncate_text_right) {
+        // Truncate the right side of the text.
+        for (var x = txt.length - 2; x > 0; x--) {
+            if (t.getSubStringLength(0, x + 2) <= w) {
+                t.textContent = txt.substring(0, x) + "..";
+                return;
+            }
+        }
+    } else {
+        // Truncate the left side of the text.
+        for (var x = 2; x < txt.length; x++) {
+            if (t.getSubStringLength(x - 2, txt.length) <= w) {
+                t.textContent = ".." + txt.substring(x, txt.length);
+                return;
+            }
+        }
+    }
+    t.textContent = "";
+}
+// zoom
+function zoom_reset(e) {
+    if (e.tagName == "rect") {
+        e.attributes.x.value = format_percent(100 * parseInt(e.attributes["fg:x"].value) / total_samples);
+        e.attributes.width.value = format_percent(100 * parseInt(e.attributes["fg:w"].value) / total_samples);
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_reset(c[i]);
+    }
+}
+function zoom_child(e, x, zoomed_width_samples) {
+    if (e.tagName == "text") {
+        var parent_x = parseFloat(find_child(e.parentNode, "rect[x]").attributes.x.value);
+        e.attributes.x.value = format_percent(parent_x + (100 * 3 / frames.attributes.width.value));
+    } else if (e.tagName == "rect") {
+        e.attributes.x.value = format_percent(100 * (parseInt(e.attributes["fg:x"].value) - x) / zoomed_width_samples);
+        e.attributes.width.value = format_percent(100 * parseInt(e.attributes["fg:w"].value) / zoomed_width_samples);
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_child(c[i], x, zoomed_width_samples);
+    }
+}
+function zoom_parent(e) {
+    if (e.attributes) {
+        if (e.attributes.x != undefined) {
+            e.attributes.x.value = "0.0%";
+        }
+        if (e.attributes.width != undefined) {
+            e.attributes.width.value = "100.0%";
+        }
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_parent(c[i]);
+    }
+}
+function zoom(node) {
+    var attr = find_child(node, "rect").attributes;
+    var width = parseInt(attr["fg:w"].value);
+    var xmin = parseInt(attr["fg:x"].value);
+    var xmax = xmin + width;
+    var ymin = parseFloat(attr.y.value);
+    unzoombtn.classList.remove("hide");
+    var el = frames.children;
+    var to_update_text = [];
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        var a = find_child(e, "rect").attributes;
+        var ex = parseInt(a["fg:x"].value);
+        var ew = parseInt(a["fg:w"].value);
+        // Is it an ancestor
+        if (!inverted) {
+            var upstack = parseFloat(a.y.value) > ymin;
+        } else {
+            var upstack = parseFloat(a.y.value) < ymin;
+        }
+        if (upstack) {
+            // Direct ancestor
+            if (ex <= xmin && (ex+ew) >= xmax) {
+                e.classList.add("parent");
+                zoom_parent(e);
+                to_update_text.push(e);
+            }
+            // not in current path
+            else
+                e.classList.add("hide");
+        }
+        // Children maybe
+        else {
+            // no common path
+            if (ex < xmin || ex >= xmax) {
+                e.classList.add("hide");
+            }
+            else {
+                zoom_child(e, xmin, width);
+                to_update_text.push(e);
+            }
+        }
+    }
+    update_text_for_elements(to_update_text);
+}
+function unzoom() {
+    unzoombtn.classList.add("hide");
+    var el = frames.children;
+    for(var i = 0; i < el.length; i++) {
+        el[i].classList.remove("parent");
+        el[i].classList.remove("hide");
+        zoom_reset(el[i]);
+    }
+    update_text_for_elements(el);
+}
+// search
+function reset_search() {
+    var el = document.querySelectorAll("#frames rect");
+    for (var i = 0; i < el.length; i++) {
+        orig_load(el[i], "fill")
+    }
+    var params = get_params();
+    delete params.s;
+    history.replaceState(null, null, parse_params(params));
+}
+function search_prompt() {
+    if (!searching) {
+        var term = prompt("Enter a search term (regexp " +
+            "allowed, eg: ^ext4_)", "");
+        if (term != null) {
+            search(term)
+        }
+    } else {
+        reset_search();
+        searching = 0;
+        searchbtn.classList.remove("show");
+        searchbtn.firstChild.nodeValue = "Search"
+        matchedtxt.classList.add("hide");
+        matchedtxt.firstChild.nodeValue = ""
+    }
+}
+function search(term) {
+    var re = new RegExp(term);
+    var el = frames.children;
+    var matches = new Object();
+    var maxwidth = 0;
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        // Skip over frames which are either not visible, or below the zoomed-to frame
+        if (e.classList.contains("hide") || e.classList.contains("parent")) {
+            continue;
+        }
+        var func = g_to_func(e);
+        var rect = find_child(e, "rect");
+        if (func == null || rect == null)
+            continue;
+        // Save max width. Only works as we have a root frame
+        var w = parseInt(rect.attributes["fg:w"].value);
+        if (w > maxwidth)
+            maxwidth = w;
+        if (func.match(re)) {
+            // highlight
+            var x = parseInt(rect.attributes["fg:x"].value);
+            orig_save(rect, "fill");
+            rect.attributes.fill.value = searchcolor;
+            // remember matches
+            if (matches[x] == undefined) {
+                matches[x] = w;
+            } else {
+                if (w > matches[x]) {
+                    // overwrite with parent
+                    matches[x] = w;
+                }
+            }
+            searching = 1;
+        }
+    }
+    if (!searching)
+        return;
+    var params = get_params();
+    params.s = term;
+    history.replaceState(null, null, parse_params(params));
+
+    searchbtn.classList.add("show");
+    searchbtn.firstChild.nodeValue = "Reset Search";
+    // calculate percent matched, excluding vertical overlap
+    var count = 0;
+    var lastx = -1;
+    var lastw = 0;
+    var keys = Array();
+    for (k in matches) {
+        if (matches.hasOwnProperty(k))
+            keys.push(k);
+    }
+    // sort the matched frames by their x location
+    // ascending, then width descending
+    keys.sort(function(a, b){
+        return a - b;
+    });
+    // Step through frames saving only the biggest bottom-up frames
+    // thanks to the sort order. This relies on the tree property
+    // where children are always smaller than their parents.
+    for (var k in keys) {
+        var x = parseInt(keys[k]);
+        var w = matches[keys[k]];
+        if (x >= lastx + lastw) {
+            count += w;
+            lastx = x;
+            lastw = w;
+        }
+    }
+    // display matched percent
+    matchedtxt.classList.remove("hide");
+    var pct = 100 * count / maxwidth;
+    if (pct != 100) pct = pct.toFixed(1);
+    matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+}
+function format_percent(n) {
+    return n.toFixed(4) + "%";
+}
+]]></script><rect x="0" y="0" width="100%" height="374" fill="url(#background)"/><text id="title" fill="rgb(0,0,0)" x="50.0000%" y="24.00">Flame Graph</text><text id="details" fill="rgb(0,0,0)" x="10" y="357.00"> </text><text id="unzoom" class="hide" fill="rgb(0,0,0)" x="10" y="24.00">Reset Zoom</text><text id="search" fill="rgb(0,0,0)" x="1190" y="24.00">Search</text><text id="matched" fill="rgb(0,0,0)" x="1190" y="357.00"> </text><svg id="frames" x="10" width="1180" total_samples="2596"><g><title>&lt;&amp;std::io::stdio::Stdout as std::io::Write&gt;::write_all (5 samples, 0.19%)</title><rect x="0.0000%" y="293" width="0.1926%" height="15" fill="rgb(227,0,7)" fg:x="0" fg:w="5"/><text x="0.2500%" y="303.50"></text></g><g><title>&lt;core::fmt::Formatter as core::fmt::Write&gt;::write_str (6 samples, 0.23%)</title><rect x="0.1926%" y="293" width="0.2311%" height="15" fill="rgb(217,0,24)" fg:x="5" fg:w="6"/><text x="0.4426%" y="303.50"></text></g><g><title>&lt;crossterm::command::write_command_ansi::Adapter&lt;T&gt; as core::fmt::Write&gt;::write_str (83 samples, 3.20%)</title><rect x="0.4237%" y="293" width="3.1972%" height="15" fill="rgb(221,193,54)" fg:x="11" fg:w="83"/><text x="0.6737%" y="303.50">&lt;cr..</text></g><g><title>&lt;crossterm::style::PrintStyledContent&lt;D&gt; as crossterm::command::Command&gt;::write_ansi (1 samples, 0.04%)</title><rect x="3.6210%" y="293" width="0.0385%" height="15" fill="rgb(248,212,6)" fg:x="94" fg:w="1"/><text x="3.8710%" y="303.50"></text></g><g><title>&lt;crossterm::style::types::colored::Colored as core::fmt::Display&gt;::fmt (2 samples, 0.08%)</title><rect x="3.6595%" y="293" width="0.0770%" height="15" fill="rgb(208,68,35)" fg:x="95" fg:w="2"/><text x="3.9095%" y="303.50"></text></g><g><title>&lt;std::io::stdio::Stdout as std::io::Write&gt;::flush (1 samples, 0.04%)</title><rect x="3.7365%" y="293" width="0.0385%" height="15" fill="rgb(232,128,0)" fg:x="97" fg:w="1"/><text x="3.9865%" y="303.50"></text></g><g><title>&lt;std::io::stdio::Stdout as std::io::Write&gt;::write_all (4 samples, 0.15%)</title><rect x="3.7750%" y="293" width="0.1541%" height="15" fill="rgb(207,160,47)" fg:x="98" fg:w="4"/><text x="4.0250%" y="303.50"></text></g><g><title>&lt;&amp;std::io::stdio::Stdout as std::io::Write&gt;::flush (8 samples, 0.31%)</title><rect x="3.9291%" y="277" width="0.3082%" height="15" fill="rgb(228,23,34)" fg:x="102" fg:w="8"/><text x="4.1791%" y="287.50"></text></g><g><title>&lt;&amp;std::io::stdio::Stdout as std::io::Write&gt;::write_all (68 samples, 2.62%)</title><rect x="4.2373%" y="277" width="2.6194%" height="15" fill="rgb(218,30,26)" fg:x="110" fg:w="68"/><text x="4.4873%" y="287.50">&lt;&amp;..</text></g><g><title>&lt;alloc::collections::vec_deque::VecDeque&lt;T,A&gt; as alloc::collections::vec_deque::spec_extend::SpecExtend&lt;T,I&gt;&gt;::spec_extend (1 samples, 0.04%)</title><rect x="6.8567%" y="277" width="0.0385%" height="15" fill="rgb(220,122,19)" fg:x="178" fg:w="1"/><text x="7.1067%" y="287.50"></text></g><g><title>&lt;crossterm::command::write_command_ansi::Adapter&lt;T&gt; as core::fmt::Write&gt;::write_str (6 samples, 0.23%)</title><rect x="6.8952%" y="277" width="0.2311%" height="15" fill="rgb(250,228,42)" fg:x="179" fg:w="6"/><text x="7.1452%" y="287.50"></text></g><g><title>&lt;crossterm::event::source::unix::mio::UnixInternalEventSource as crossterm::event::source::EventSource&gt;::try_read (6 samples, 0.23%)</title><rect x="7.1263%" y="277" width="0.2311%" height="15" fill="rgb(240,193,28)" fg:x="185" fg:w="6"/><text x="7.3763%" y="287.50"></text></g><g><title>&lt;crossterm::style::PrintStyledContent&lt;D&gt; as crossterm::command::Command&gt;::write_ansi (3 samples, 0.12%)</title><rect x="7.3575%" y="277" width="0.1156%" height="15" fill="rgb(216,20,37)" fg:x="191" fg:w="3"/><text x="7.6075%" y="287.50"></text></g><g><title>&lt;crossterm::style::types::colored::Colored as core::fmt::Display&gt;::fmt (28 samples, 1.08%)</title><rect x="7.4730%" y="277" width="1.0786%" height="15" fill="rgb(206,188,39)" fg:x="194" fg:w="28"/><text x="7.7230%" y="287.50"></text></g><g><title>&lt;std::io::stdio::Stdout as std::io::Write&gt;::write_all (59 samples, 2.27%)</title><rect x="8.5516%" y="277" width="2.2727%" height="15" fill="rgb(217,207,13)" fg:x="222" fg:w="59"/><text x="8.8016%" y="287.50">&lt;..</text></g><g><title>&lt;std::io::stdio::StdoutLock as std::io::Write&gt;::write_all (32 samples, 1.23%)</title><rect x="10.8243%" y="277" width="1.2327%" height="15" fill="rgb(231,73,38)" fg:x="281" fg:w="32"/><text x="11.0743%" y="287.50"></text></g><g><title>&lt;str as core::fmt::Display&gt;::fmt (8 samples, 0.31%)</title><rect x="12.0570%" y="277" width="0.3082%" height="15" fill="rgb(225,20,46)" fg:x="313" fg:w="8"/><text x="12.3070%" y="287.50"></text></g><g><title>[libc.so.6] (2 samples, 0.08%)</title><rect x="12.3652%" y="277" width="0.0770%" height="15" fill="rgb(210,31,41)" fg:x="321" fg:w="2"/><text x="12.6152%" y="287.50"></text></g><g><title>[pendulum] (2 samples, 0.08%)</title><rect x="12.4422%" y="277" width="0.0770%" height="15" fill="rgb(221,200,47)" fg:x="323" fg:w="2"/><text x="12.6922%" y="287.50"></text></g><g><title>&lt;crossterm::style::PrintStyledContent&lt;D&gt; as crossterm::command::Command&gt;::write_ansi (2 samples, 0.08%)</title><rect x="12.4422%" y="261" width="0.0770%" height="15" fill="rgb(226,26,5)" fg:x="323" fg:w="2"/><text x="12.6922%" y="271.50"></text></g><g><title>_ZN4core3ptr81drop_in_place$LT$core..result..Result$LT$$LP$$RP$$C$std..io..error..Error$GT$$GT$17h8cefbe2cae632f96E.llvm.11115292338935244090 (3 samples, 0.12%)</title><rect x="12.5193%" y="277" width="0.1156%" height="15" fill="rgb(249,33,26)" fg:x="325" fg:w="3"/><text x="12.7693%" y="287.50"></text></g><g><title>__vdso_clock_gettime (1 samples, 0.04%)</title><rect x="12.6348%" y="277" width="0.0385%" height="15" fill="rgb(235,183,28)" fg:x="328" fg:w="1"/><text x="12.8848%" y="287.50"></text></g><g><title>core::fmt::Formatter::pad (4 samples, 0.15%)</title><rect x="12.6733%" y="277" width="0.1541%" height="15" fill="rgb(221,5,38)" fg:x="329" fg:w="4"/><text x="12.9233%" y="287.50"></text></g><g><title>core::fmt::Formatter::pad_integral (8 samples, 0.31%)</title><rect x="12.8274%" y="277" width="0.3082%" height="15" fill="rgb(247,18,42)" fg:x="333" fg:w="8"/><text x="13.0774%" y="287.50"></text></g><g><title>core::fmt::Formatter::pad_integral::write_prefix (3 samples, 0.12%)</title><rect x="13.1356%" y="277" width="0.1156%" height="15" fill="rgb(241,131,45)" fg:x="341" fg:w="3"/><text x="13.3856%" y="287.50"></text></g><g><title>core::fmt::num::imp::&lt;impl core::fmt::Display for u16&gt;::fmt (25 samples, 0.96%)</title><rect x="13.2512%" y="277" width="0.9630%" height="15" fill="rgb(249,31,29)" fg:x="344" fg:w="25"/><text x="13.5012%" y="287.50"></text></g><g><title>core::slice::memchr::memrchr (65 samples, 2.50%)</title><rect x="14.2142%" y="277" width="2.5039%" height="15" fill="rgb(225,111,53)" fg:x="369" fg:w="65"/><text x="14.4642%" y="287.50">co..</text></g><g><title>pendulum::main (12 samples, 0.46%)</title><rect x="16.7180%" y="277" width="0.4622%" height="15" fill="rgb(238,160,17)" fg:x="434" fg:w="12"/><text x="16.9680%" y="287.50"></text></g><g><title>std::io::buffered::bufwriter::BufWriter&lt;W&gt;::flush_buf (1 samples, 0.04%)</title><rect x="17.1803%" y="277" width="0.0385%" height="15" fill="rgb(214,148,48)" fg:x="446" fg:w="1"/><text x="17.4303%" y="287.50"></text></g><g><title>std::sys::pal::unix::fs::File::open_c (1 samples, 0.04%)</title><rect x="17.2188%" y="277" width="0.0385%" height="15" fill="rgb(232,36,49)" fg:x="447" fg:w="1"/><text x="17.4688%" y="287.50"></text></g><g><title>std::sys::pal::unix::time::Timespec::now (5 samples, 0.19%)</title><rect x="17.2573%" y="277" width="0.1926%" height="15" fill="rgb(209,103,24)" fg:x="448" fg:w="5"/><text x="17.5073%" y="287.50"></text></g><g><title>[[stack]] (352 samples, 13.56%)</title><rect x="3.9291%" y="293" width="13.5593%" height="15" fill="rgb(229,88,8)" fg:x="102" fg:w="352"/><text x="4.1791%" y="303.50">[[stack]]</text></g><g><title>std::sys::pal::unix::time::Timespec::sub_timespec (1 samples, 0.04%)</title><rect x="17.4499%" y="277" width="0.0385%" height="15" fill="rgb(213,181,19)" fg:x="453" fg:w="1"/><text x="17.6999%" y="287.50"></text></g><g><title>_ZN4core3ptr81drop_in_place$LT$core..result..Result$LT$$LP$$RP$$C$std..io..error..Error$GT$$GT$17h8cefbe2cae632f96E.llvm.11115292338935244090 (1 samples, 0.04%)</title><rect x="17.4884%" y="277" width="0.0385%" height="15" fill="rgb(254,191,54)" fg:x="454" fg:w="1"/><text x="17.7384%" y="287.50"></text></g><g><title>crossterm::command::write_command_ansi (1 samples, 0.04%)</title><rect x="17.5270%" y="277" width="0.0385%" height="15" fill="rgb(241,83,37)" fg:x="455" fg:w="1"/><text x="17.7770%" y="287.50"></text></g><g><title>[anon] (3 samples, 0.12%)</title><rect x="17.4884%" y="293" width="0.1156%" height="15" fill="rgb(233,36,39)" fg:x="454" fg:w="3"/><text x="17.7384%" y="303.50"></text></g><g><title>open64 (1 samples, 0.04%)</title><rect x="17.5655%" y="277" width="0.0385%" height="15" fill="rgb(226,3,54)" fg:x="456" fg:w="1"/><text x="17.8155%" y="287.50"></text></g><g><title>[ld-linux-x86-64.so.2] (7 samples, 0.27%)</title><rect x="17.6040%" y="293" width="0.2696%" height="15" fill="rgb(245,192,40)" fg:x="457" fg:w="7"/><text x="17.8540%" y="303.50"></text></g><g><title>[ld-linux-x86-64.so.2] (2 samples, 0.08%)</title><rect x="17.7966%" y="277" width="0.0770%" height="15" fill="rgb(238,167,29)" fg:x="462" fg:w="2"/><text x="18.0466%" y="287.50"></text></g><g><title>[ld-linux-x86-64.so.2] (2 samples, 0.08%)</title><rect x="17.7966%" y="261" width="0.0770%" height="15" fill="rgb(232,182,51)" fg:x="462" fg:w="2"/><text x="18.0466%" y="271.50"></text></g><g><title>[ld-linux-x86-64.so.2] (2 samples, 0.08%)</title><rect x="17.7966%" y="245" width="0.0770%" height="15" fill="rgb(231,60,39)" fg:x="462" fg:w="2"/><text x="18.0466%" y="255.50"></text></g><g><title>[ld-linux-x86-64.so.2] (1 samples, 0.04%)</title><rect x="17.8351%" y="229" width="0.0385%" height="15" fill="rgb(208,69,12)" fg:x="463" fg:w="1"/><text x="18.0851%" y="239.50"></text></g><g><title>wmemcmp (1 samples, 0.04%)</title><rect x="17.8351%" y="213" width="0.0385%" height="15" fill="rgb(235,93,37)" fg:x="463" fg:w="1"/><text x="18.0851%" y="223.50"></text></g><g><title>&lt;&amp;std::io::stdio::Stdout as std::io::Write&gt;::write_all (3 samples, 0.12%)</title><rect x="17.8737%" y="277" width="0.1156%" height="15" fill="rgb(213,116,39)" fg:x="464" fg:w="3"/><text x="18.1237%" y="287.50"></text></g><g><title>&lt;std::io::stdio::Stdout as std::io::Write&gt;::write_all (5 samples, 0.19%)</title><rect x="17.9892%" y="277" width="0.1926%" height="15" fill="rgb(222,207,29)" fg:x="467" fg:w="5"/><text x="18.2392%" y="287.50"></text></g><g><title>&lt;std::io::stdio::StdoutLock as std::io::Write&gt;::write_all (14 samples, 0.54%)</title><rect x="18.1818%" y="277" width="0.5393%" height="15" fill="rgb(206,96,30)" fg:x="472" fg:w="14"/><text x="18.4318%" y="287.50"></text></g><g><title>crossterm::event::read::InternalEventReader::poll (1 samples, 0.04%)</title><rect x="18.7211%" y="277" width="0.0385%" height="15" fill="rgb(218,138,4)" fg:x="486" fg:w="1"/><text x="18.9711%" y="287.50"></text></g><g><title>[pendulum] (24 samples, 0.92%)</title><rect x="17.8737%" y="293" width="0.9245%" height="15" fill="rgb(250,191,14)" fg:x="464" fg:w="24"/><text x="18.1237%" y="303.50"></text></g><g><title>std::io::buffered::bufwriter::BufWriter&lt;W&gt;::flush_buf (1 samples, 0.04%)</title><rect x="18.7596%" y="277" width="0.0385%" height="15" fill="rgb(239,60,40)" fg:x="487" fg:w="1"/><text x="19.0096%" y="287.50"></text></g><g><title>&lt;core::fmt::Formatter as core::fmt::Write&gt;::write_str (13 samples, 0.50%)</title><rect x="18.7982%" y="277" width="0.5008%" height="15" fill="rgb(206,27,48)" fg:x="488" fg:w="13"/><text x="19.0482%" y="287.50"></text></g><g><title>&lt;crossterm::command::write_command_ansi::Adapter&lt;T&gt; as core::fmt::Write&gt;::write_str (45 samples, 1.73%)</title><rect x="19.2989%" y="277" width="1.7334%" height="15" fill="rgb(225,35,8)" fg:x="501" fg:w="45"/><text x="19.5489%" y="287.50"></text></g><g><title>&lt;crossterm::style::PrintStyledContent&lt;D&gt; as crossterm::command::Command&gt;::write_ansi (7 samples, 0.27%)</title><rect x="21.0324%" y="277" width="0.2696%" height="15" fill="rgb(250,213,24)" fg:x="546" fg:w="7"/><text x="21.2824%" y="287.50"></text></g><g><title>&lt;crossterm::style::types::colored::Colored as core::fmt::Display&gt;::fmt (5 samples, 0.19%)</title><rect x="21.3020%" y="277" width="0.1926%" height="15" fill="rgb(247,123,22)" fg:x="553" fg:w="5"/><text x="21.5520%" y="287.50"></text></g><g><title>&lt;std::io::stdio::Stdout as std::io::Write&gt;::flush (8 samples, 0.31%)</title><rect x="21.4946%" y="277" width="0.3082%" height="15" fill="rgb(231,138,38)" fg:x="558" fg:w="8"/><text x="21.7446%" y="287.50"></text></g><g><title>&lt;std::io::stdio::Stdout as std::io::Write&gt;::write_all (20 samples, 0.77%)</title><rect x="21.8028%" y="277" width="0.7704%" height="15" fill="rgb(231,145,46)" fg:x="566" fg:w="20"/><text x="22.0528%" y="287.50"></text></g><g><title>[libm.so.6] (1 samples, 0.04%)</title><rect x="22.5732%" y="277" width="0.0385%" height="15" fill="rgb(251,118,11)" fg:x="586" fg:w="1"/><text x="22.8232%" y="287.50"></text></g><g><title>_ZN4core3ptr81drop_in_place$LT$core..result..Result$LT$$LP$$RP$$C$std..io..error..Error$GT$$GT$17h8cefbe2cae632f96E.llvm.11115292338935244090 (7 samples, 0.27%)</title><rect x="22.6117%" y="277" width="0.2696%" height="15" fill="rgb(217,147,25)" fg:x="587" fg:w="7"/><text x="22.8617%" y="287.50"></text></g><g><title>__close (2 samples, 0.08%)</title><rect x="22.8814%" y="277" width="0.0770%" height="15" fill="rgb(247,81,37)" fg:x="594" fg:w="2"/><text x="23.1314%" y="287.50"></text></g><g><title>clock_gettime (1 samples, 0.04%)</title><rect x="22.9584%" y="277" width="0.0385%" height="15" fill="rgb(209,12,38)" fg:x="596" fg:w="1"/><text x="23.2084%" y="287.50"></text></g><g><title>core::fmt::write (16 samples, 0.62%)</title><rect x="22.9969%" y="277" width="0.6163%" height="15" fill="rgb(227,1,9)" fg:x="597" fg:w="16"/><text x="23.2469%" y="287.50"></text></g><g><title>crossterm::command::write_command_ansi (11 samples, 0.42%)</title><rect x="23.6133%" y="277" width="0.4237%" height="15" fill="rgb(248,47,43)" fg:x="613" fg:w="11"/><text x="23.8633%" y="287.50"></text></g><g><title>crossterm::event::poll (3 samples, 0.12%)</title><rect x="24.0370%" y="277" width="0.1156%" height="15" fill="rgb(221,10,30)" fg:x="624" fg:w="3"/><text x="24.2870%" y="287.50"></text></g><g><title>crossterm::event::read::InternalEventReader::poll (2 samples, 0.08%)</title><rect x="24.1525%" y="277" width="0.0770%" height="15" fill="rgb(210,229,1)" fg:x="627" fg:w="2"/><text x="24.4025%" y="287.50"></text></g><g><title>crossterm::event::timeout::PollTimeout::leftover (9 samples, 0.35%)</title><rect x="24.2296%" y="277" width="0.3467%" height="15" fill="rgb(222,148,37)" fg:x="629" fg:w="9"/><text x="24.4796%" y="287.50"></text></g><g><title>crossterm::terminal::size (1 samples, 0.04%)</title><rect x="24.5763%" y="277" width="0.0385%" height="15" fill="rgb(234,67,33)" fg:x="638" fg:w="1"/><text x="24.8263%" y="287.50"></text></g><g><title>crossterm::terminal::sys::unix::size (4 samples, 0.15%)</title><rect x="24.6148%" y="277" width="0.1541%" height="15" fill="rgb(247,98,35)" fg:x="639" fg:w="4"/><text x="24.8648%" y="287.50"></text></g><g><title>crossterm::terminal::sys::unix::window_size (4 samples, 0.15%)</title><rect x="24.7689%" y="277" width="0.1541%" height="15" fill="rgb(247,138,52)" fg:x="643" fg:w="4"/><text x="25.0189%" y="287.50"></text></g><g><title>mio::sys::unix::selector::epoll::Selector::select (1 samples, 0.04%)</title><rect x="24.9230%" y="277" width="0.0385%" height="15" fill="rgb(213,79,30)" fg:x="647" fg:w="1"/><text x="25.1730%" y="287.50"></text></g><g><title>std::fs::OpenOptions::_open (3 samples, 0.12%)</title><rect x="24.9615%" y="277" width="0.1156%" height="15" fill="rgb(246,177,23)" fg:x="648" fg:w="3"/><text x="25.2115%" y="287.50"></text></g><g><title>std::sys::pal::unix::time::Timespec::now (1 samples, 0.04%)</title><rect x="25.0770%" y="277" width="0.0385%" height="15" fill="rgb(230,62,27)" fg:x="651" fg:w="1"/><text x="25.3270%" y="287.50"></text></g><g><title>std::time::Instant::elapsed (3 samples, 0.12%)</title><rect x="25.1156%" y="277" width="0.1156%" height="15" fill="rgb(216,154,8)" fg:x="652" fg:w="3"/><text x="25.3656%" y="287.50"></text></g><g><title>[unknown] (169 samples, 6.51%)</title><rect x="18.7982%" y="293" width="6.5100%" height="15" fill="rgb(244,35,45)" fg:x="488" fg:w="169"/><text x="19.0482%" y="303.50">[unknown]</text></g><g><title>std::time::Instant::now (2 samples, 0.08%)</title><rect x="25.2311%" y="277" width="0.0770%" height="15" fill="rgb(251,115,12)" fg:x="655" fg:w="2"/><text x="25.4811%" y="287.50"></text></g><g><title>&lt;std::io::stdio::Stdout as std::io::Write&gt;::flush (142 samples, 5.47%)</title><rect x="27.6579%" y="165" width="5.4700%" height="15" fill="rgb(240,54,50)" fg:x="718" fg:w="142"/><text x="27.9079%" y="175.50">&lt;std::i..</text></g><g><title>&lt;&amp;std::io::stdio::Stdout as std::io::Write&gt;::flush (135 samples, 5.20%)</title><rect x="27.9276%" y="149" width="5.2003%" height="15" fill="rgb(233,84,52)" fg:x="725" fg:w="135"/><text x="28.1776%" y="159.50">&lt;&amp;std:..</text></g><g><title>std::io::buffered::bufwriter::BufWriter&lt;W&gt;::flush_buf (70 samples, 2.70%)</title><rect x="30.4314%" y="133" width="2.6965%" height="15" fill="rgb(207,117,47)" fg:x="790" fg:w="70"/><text x="30.6814%" y="143.50">st..</text></g><g><title>write (45 samples, 1.73%)</title><rect x="31.3945%" y="117" width="1.7334%" height="15" fill="rgb(249,43,39)" fg:x="815" fg:w="45"/><text x="31.6445%" y="127.50"></text></g><g><title>[libc.so.6] (1 samples, 0.04%)</title><rect x="33.4361%" y="117" width="0.0385%" height="15" fill="rgb(209,38,44)" fg:x="868" fg:w="1"/><text x="33.6861%" y="127.50"></text></g><g><title>&lt;std::io::stdio::Stdout as std::io::Write&gt;::write_all (14 samples, 0.54%)</title><rect x="33.1279%" y="165" width="0.5393%" height="15" fill="rgb(236,212,23)" fg:x="860" fg:w="14"/><text x="33.3779%" y="175.50"></text></g><g><title>&lt;&amp;std::io::stdio::Stdout as std::io::Write&gt;::write_all (12 samples, 0.46%)</title><rect x="33.2049%" y="149" width="0.4622%" height="15" fill="rgb(242,79,21)" fg:x="862" fg:w="12"/><text x="33.4549%" y="159.50"></text></g><g><title>&lt;std::io::stdio::StdoutLock as std::io::Write&gt;::write_all (10 samples, 0.39%)</title><rect x="33.2820%" y="133" width="0.3852%" height="15" fill="rgb(211,96,35)" fg:x="864" fg:w="10"/><text x="33.5320%" y="143.50"></text></g><g><title>core::slice::memchr::memrchr (5 samples, 0.19%)</title><rect x="33.4746%" y="117" width="0.1926%" height="15" fill="rgb(253,215,40)" fg:x="869" fg:w="5"/><text x="33.7246%" y="127.50"></text></g><g><title>[libm.so.6] (15 samples, 0.58%)</title><rect x="33.6672%" y="165" width="0.5778%" height="15" fill="rgb(211,81,21)" fg:x="874" fg:w="15"/><text x="33.9172%" y="175.50"></text></g><g><title>core::fmt::Formatter::pad (1 samples, 0.04%)</title><rect x="35.9784%" y="133" width="0.0385%" height="15" fill="rgb(208,190,38)" fg:x="934" fg:w="1"/><text x="36.2284%" y="143.50"></text></g><g><title>[libc.so.6] (54 samples, 2.08%)</title><rect x="49.6148%" y="53" width="2.0801%" height="15" fill="rgb(235,213,38)" fg:x="1288" fg:w="54"/><text x="49.8648%" y="63.50">[..</text></g><g><title>&lt;crossterm::command::write_command_ansi::Adapter&lt;T&gt; as core::fmt::Write&gt;::write_str (413 samples, 15.91%)</title><rect x="38.8290%" y="117" width="15.9091%" height="15" fill="rgb(237,122,38)" fg:x="1008" fg:w="413"/><text x="39.0790%" y="127.50">&lt;crossterm::command::wri..</text></g><g><title>&lt;std::io::stdio::Stdout as std::io::Write&gt;::write_all (406 samples, 15.64%)</title><rect x="39.0986%" y="101" width="15.6394%" height="15" fill="rgb(244,218,35)" fg:x="1015" fg:w="406"/><text x="39.3486%" y="111.50">&lt;std::io::stdio::Stdout ..</text></g><g><title>&lt;&amp;std::io::stdio::Stdout as std::io::Write&gt;::write_all (399 samples, 15.37%)</title><rect x="39.3683%" y="85" width="15.3698%" height="15" fill="rgb(240,68,47)" fg:x="1022" fg:w="399"/><text x="39.6183%" y="95.50">&lt;&amp;std::io::stdio::Stdout..</text></g><g><title>&lt;std::io::stdio::StdoutLock as std::io::Write&gt;::write_all (197 samples, 7.59%)</title><rect x="47.1495%" y="69" width="7.5886%" height="15" fill="rgb(210,16,53)" fg:x="1224" fg:w="197"/><text x="47.3995%" y="79.50">&lt;std::io::..</text></g><g><title>core::slice::memchr::memrchr (79 samples, 3.04%)</title><rect x="51.6949%" y="53" width="3.0431%" height="15" fill="rgb(235,124,12)" fg:x="1342" fg:w="79"/><text x="51.9449%" y="63.50">cor..</text></g><g><title>&lt;core::fmt::Formatter as core::fmt::Write&gt;::write_str (9 samples, 0.35%)</title><rect x="55.5085%" y="101" width="0.3467%" height="15" fill="rgb(224,169,11)" fg:x="1441" fg:w="9"/><text x="55.7585%" y="111.50"></text></g><g><title>[libc.so.6] (37 samples, 1.43%)</title><rect x="63.0586%" y="37" width="1.4253%" height="15" fill="rgb(250,166,2)" fg:x="1637" fg:w="37"/><text x="63.3086%" y="47.50"></text></g><g><title>&lt;&amp;std::io::stdio::Stdout as std::io::Write&gt;::write_all (268 samples, 10.32%)</title><rect x="56.1633%" y="69" width="10.3236%" height="15" fill="rgb(242,216,29)" fg:x="1458" fg:w="268"/><text x="56.4133%" y="79.50">&lt;&amp;std::io::stdi..</text></g><g><title>&lt;std::io::stdio::StdoutLock as std::io::Write&gt;::write_all (144 samples, 5.55%)</title><rect x="60.9399%" y="53" width="5.5470%" height="15" fill="rgb(230,116,27)" fg:x="1582" fg:w="144"/><text x="61.1899%" y="63.50">&lt;std::i..</text></g><g><title>core::slice::memchr::memrchr (52 samples, 2.00%)</title><rect x="64.4838%" y="37" width="2.0031%" height="15" fill="rgb(228,99,48)" fg:x="1674" fg:w="52"/><text x="64.7338%" y="47.50">c..</text></g><g><title>&lt;crossterm::style::types::colored::Colored as core::fmt::Display&gt;::fmt (307 samples, 11.83%)</title><rect x="54.7381%" y="117" width="11.8259%" height="15" fill="rgb(253,11,6)" fg:x="1421" fg:w="307"/><text x="54.9881%" y="127.50">&lt;crossterm::style:..</text></g><g><title>&lt;crossterm::command::write_command_ansi::Adapter&lt;T&gt; as core::fmt::Write&gt;::write_str (278 samples, 10.71%)</title><rect x="55.8552%" y="101" width="10.7088%" height="15" fill="rgb(247,143,39)" fg:x="1450" fg:w="278"/><text x="56.1052%" y="111.50">&lt;crossterm::comm..</text></g><g><title>&lt;std::io::stdio::Stdout as std::io::Write&gt;::write_all (274 samples, 10.55%)</title><rect x="56.0092%" y="85" width="10.5547%" height="15" fill="rgb(236,97,10)" fg:x="1454" fg:w="274"/><text x="56.2592%" y="95.50">&lt;std::io::stdio..</text></g><g><title>&lt;std::io::stdio::StdoutLock as std::io::Write&gt;::write_all (2 samples, 0.08%)</title><rect x="66.4869%" y="69" width="0.0770%" height="15" fill="rgb(233,208,19)" fg:x="1726" fg:w="2"/><text x="66.7369%" y="79.50"></text></g><g><title>_ZN44_$LT$$RF$T$u20$as$u20$core..fmt..Display$GT$3fmt17hc53e3fcda9f8ca49E.llvm.14796134226882227835 (11 samples, 0.42%)</title><rect x="66.5639%" y="117" width="0.4237%" height="15" fill="rgb(216,164,2)" fg:x="1728" fg:w="11"/><text x="66.8139%" y="127.50"></text></g><g><title>&lt;crossterm::style::PrintStyledContent&lt;D&gt; as crossterm::command::Command&gt;::write_ansi (851 samples, 32.78%)</title><rect x="34.6687%" y="149" width="32.7812%" height="15" fill="rgb(220,129,5)" fg:x="900" fg:w="851"/><text x="34.9187%" y="159.50">&lt;crossterm::style::PrintStyledContent&lt;D&gt; as crossterm..</text></g><g><title>core::fmt::write (816 samples, 31.43%)</title><rect x="36.0169%" y="133" width="31.4330%" height="15" fill="rgb(242,17,10)" fg:x="935" fg:w="816"/><text x="36.2669%" y="143.50">core::fmt::write</text></g><g><title>core::fmt::Formatter::pad (12 samples, 0.46%)</title><rect x="66.9877%" y="117" width="0.4622%" height="15" fill="rgb(242,107,0)" fg:x="1739" fg:w="12"/><text x="67.2377%" y="127.50"></text></g><g><title>core::fmt::num::imp::&lt;impl core::fmt::Display for u16&gt;::fmt (5 samples, 0.19%)</title><rect x="67.4499%" y="149" width="0.1926%" height="15" fill="rgb(251,28,31)" fg:x="1751" fg:w="5"/><text x="67.6999%" y="159.50"></text></g><g><title>[libc.so.6] (45 samples, 1.73%)</title><rect x="76.6179%" y="69" width="1.7334%" height="15" fill="rgb(233,223,10)" fg:x="1989" fg:w="45"/><text x="76.8679%" y="79.50"></text></g><g><title>&lt;crossterm::command::write_command_ansi::Adapter&lt;T&gt; as core::fmt::Write&gt;::write_str (281 samples, 10.82%)</title><rect x="69.4530%" y="133" width="10.8243%" height="15" fill="rgb(215,21,27)" fg:x="1803" fg:w="281"/><text x="69.7030%" y="143.50">&lt;crossterm::comm..</text></g><g><title>&lt;std::io::stdio::Stdout as std::io::Write&gt;::write_all (279 samples, 10.75%)</title><rect x="69.5300%" y="117" width="10.7473%" height="15" fill="rgb(232,23,21)" fg:x="1805" fg:w="279"/><text x="69.7800%" y="127.50">&lt;std::io::stdio:..</text></g><g><title>&lt;&amp;std::io::stdio::Stdout as std::io::Write&gt;::write_all (275 samples, 10.59%)</title><rect x="69.6841%" y="101" width="10.5932%" height="15" fill="rgb(244,5,23)" fg:x="1809" fg:w="275"/><text x="69.9341%" y="111.50">&lt;&amp;std::io::stdi..</text></g><g><title>&lt;std::io::stdio::StdoutLock as std::io::Write&gt;::write_all (146 samples, 5.62%)</title><rect x="74.6533%" y="85" width="5.6240%" height="15" fill="rgb(226,81,46)" fg:x="1938" fg:w="146"/><text x="74.9033%" y="95.50">&lt;std::i..</text></g><g><title>core::slice::memchr::memrchr (50 samples, 1.93%)</title><rect x="78.3513%" y="69" width="1.9260%" height="15" fill="rgb(247,70,30)" fg:x="2034" fg:w="50"/><text x="78.6013%" y="79.50">c..</text></g><g><title>[libc.so.6] (21 samples, 0.81%)</title><rect x="87.2111%" y="53" width="0.8089%" height="15" fill="rgb(212,68,19)" fg:x="2264" fg:w="21"/><text x="87.4611%" y="63.50"></text></g><g><title>&lt;crossterm::command::write_command_ansi::Adapter&lt;T&gt; as core::fmt::Write&gt;::write_str (199 samples, 7.67%)</title><rect x="81.8567%" y="117" width="7.6656%" height="15" fill="rgb(240,187,13)" fg:x="2125" fg:w="199"/><text x="82.1067%" y="127.50">&lt;crossterm..</text></g><g><title>&lt;std::io::stdio::Stdout as std::io::Write&gt;::write_all (197 samples, 7.59%)</title><rect x="81.9337%" y="101" width="7.5886%" height="15" fill="rgb(223,113,26)" fg:x="2127" fg:w="197"/><text x="82.1837%" y="111.50">&lt;std::io::..</text></g><g><title>&lt;&amp;std::io::stdio::Stdout as std::io::Write&gt;::write_all (183 samples, 7.05%)</title><rect x="82.4730%" y="85" width="7.0493%" height="15" fill="rgb(206,192,2)" fg:x="2141" fg:w="183"/><text x="82.7230%" y="95.50">&lt;&amp;std::io..</text></g><g><title>&lt;std::io::stdio::StdoutLock as std::io::Write&gt;::write_all (99 samples, 3.81%)</title><rect x="85.7088%" y="69" width="3.8136%" height="15" fill="rgb(241,108,4)" fg:x="2225" fg:w="99"/><text x="85.9588%" y="79.50">&lt;std..</text></g><g><title>core::slice::memchr::memrchr (39 samples, 1.50%)</title><rect x="88.0200%" y="53" width="1.5023%" height="15" fill="rgb(247,173,49)" fg:x="2285" fg:w="39"/><text x="88.2700%" y="63.50"></text></g><g><title>crossterm::command::write_command_ansi (1,466 samples, 56.47%)</title><rect x="34.2450%" y="165" width="56.4715%" height="15" fill="rgb(224,114,35)" fg:x="889" fg:w="1466"/><text x="34.4950%" y="175.50">crossterm::command::write_command_ansi</text></g><g><title>core::fmt::write (599 samples, 23.07%)</title><rect x="67.6425%" y="149" width="23.0740%" height="15" fill="rgb(245,159,27)" fg:x="1756" fg:w="599"/><text x="67.8925%" y="159.50">core::fmt::write</text></g><g><title>core::fmt::num::imp::&lt;impl core::fmt::Display for u16&gt;::fmt (271 samples, 10.44%)</title><rect x="80.2773%" y="133" width="10.4391%" height="15" fill="rgb(245,172,44)" fg:x="2084" fg:w="271"/><text x="80.5273%" y="143.50">core::fmt::num:..</text></g><g><title>core::fmt::Formatter::pad_integral (31 samples, 1.19%)</title><rect x="89.5223%" y="117" width="1.1941%" height="15" fill="rgb(236,23,11)" fg:x="2324" fg:w="31"/><text x="89.7723%" y="127.50"></text></g><g><title>core::fmt::Formatter::pad_integral::write_prefix (12 samples, 0.46%)</title><rect x="90.2542%" y="101" width="0.4622%" height="15" fill="rgb(205,117,38)" fg:x="2343" fg:w="12"/><text x="90.5042%" y="111.50"></text></g><g><title>&lt;alloc::collections::vec_deque::VecDeque&lt;T,A&gt; as alloc::collections::vec_deque::spec_extend::SpecExtend&lt;T,I&gt;&gt;::spec_extend (1 samples, 0.04%)</title><rect x="91.2173%" y="133" width="0.0385%" height="15" fill="rgb(237,72,25)" fg:x="2368" fg:w="1"/><text x="91.4673%" y="143.50"></text></g><g><title>crossterm::event::timeout::PollTimeout::leftover (5 samples, 0.19%)</title><rect x="91.6795%" y="117" width="0.1926%" height="15" fill="rgb(244,70,9)" fg:x="2380" fg:w="5"/><text x="91.9295%" y="127.50"></text></g><g><title>std::time::Instant::elapsed (4 samples, 0.15%)</title><rect x="91.7180%" y="101" width="0.1541%" height="15" fill="rgb(217,125,39)" fg:x="2381" fg:w="4"/><text x="91.9680%" y="111.50"></text></g><g><title>std::sys::pal::unix::time::Timespec::now (1 samples, 0.04%)</title><rect x="91.8336%" y="85" width="0.0385%" height="15" fill="rgb(235,36,10)" fg:x="2384" fg:w="1"/><text x="92.0836%" y="95.50"></text></g><g><title>clock_gettime (1 samples, 0.04%)</title><rect x="91.8336%" y="69" width="0.0385%" height="15" fill="rgb(251,123,47)" fg:x="2384" fg:w="1"/><text x="92.0836%" y="79.50"></text></g><g><title>__vdso_clock_gettime (1 samples, 0.04%)</title><rect x="91.8336%" y="53" width="0.0385%" height="15" fill="rgb(221,13,13)" fg:x="2384" fg:w="1"/><text x="92.0836%" y="63.50"></text></g><g><title>mio::sys::unix::selector::epoll::Selector::select (54 samples, 2.08%)</title><rect x="91.8721%" y="117" width="2.0801%" height="15" fill="rgb(238,131,9)" fg:x="2385" fg:w="54"/><text x="92.1221%" y="127.50">m..</text></g><g><title>epoll_wait (41 samples, 1.58%)</title><rect x="92.3729%" y="101" width="1.5794%" height="15" fill="rgb(211,50,8)" fg:x="2398" fg:w="41"/><text x="92.6229%" y="111.50"></text></g><g><title>&lt;crossterm::event::source::unix::mio::UnixInternalEventSource as crossterm::event::source::EventSource&gt;::try_read (73 samples, 2.81%)</title><rect x="91.2558%" y="133" width="2.8120%" height="15" fill="rgb(245,182,24)" fg:x="2369" fg:w="73"/><text x="91.5058%" y="143.50">&lt;c..</text></g><g><title>std::sys::pal::unix::time::Timespec::now (3 samples, 0.12%)</title><rect x="93.9522%" y="117" width="0.1156%" height="15" fill="rgb(242,14,37)" fg:x="2439" fg:w="3"/><text x="94.2022%" y="127.50"></text></g><g><title>clock_gettime (3 samples, 0.12%)</title><rect x="93.9522%" y="101" width="0.1156%" height="15" fill="rgb(246,228,12)" fg:x="2439" fg:w="3"/><text x="94.2022%" y="111.50"></text></g><g><title>__vdso_clock_gettime (2 samples, 0.08%)</title><rect x="93.9908%" y="85" width="0.0770%" height="15" fill="rgb(213,55,15)" fg:x="2440" fg:w="2"/><text x="94.2408%" y="95.50"></text></g><g><title>crossterm::event::timeout::PollTimeout::leftover (3 samples, 0.12%)</title><rect x="94.0678%" y="133" width="0.1156%" height="15" fill="rgb(209,9,3)" fg:x="2442" fg:w="3"/><text x="94.3178%" y="143.50"></text></g><g><title>std::time::Instant::elapsed (2 samples, 0.08%)</title><rect x="94.1063%" y="117" width="0.0770%" height="15" fill="rgb(230,59,30)" fg:x="2443" fg:w="2"/><text x="94.3563%" y="127.50"></text></g><g><title>std::sys::pal::unix::time::Timespec::now (2 samples, 0.08%)</title><rect x="94.1063%" y="101" width="0.0770%" height="15" fill="rgb(209,121,21)" fg:x="2443" fg:w="2"/><text x="94.3563%" y="111.50"></text></g><g><title>clock_gettime (1 samples, 0.04%)</title><rect x="94.1448%" y="85" width="0.0385%" height="15" fill="rgb(220,109,13)" fg:x="2444" fg:w="1"/><text x="94.3948%" y="95.50"></text></g><g><title>std::sys::pal::unix::time::Timespec::now (4 samples, 0.15%)</title><rect x="94.1834%" y="133" width="0.1541%" height="15" fill="rgb(232,18,1)" fg:x="2445" fg:w="4"/><text x="94.4334%" y="143.50"></text></g><g><title>clock_gettime (4 samples, 0.15%)</title><rect x="94.1834%" y="117" width="0.1541%" height="15" fill="rgb(215,41,42)" fg:x="2445" fg:w="4"/><text x="94.4334%" y="127.50"></text></g><g><title>__vdso_clock_gettime (3 samples, 0.12%)</title><rect x="94.2219%" y="101" width="0.1156%" height="15" fill="rgb(224,123,36)" fg:x="2446" fg:w="3"/><text x="94.4719%" y="111.50"></text></g><g><title>std::sys::pal::unix::time::Timespec::now (18 samples, 0.69%)</title><rect x="94.3374%" y="117" width="0.6934%" height="15" fill="rgb(240,125,3)" fg:x="2449" fg:w="18"/><text x="94.5874%" y="127.50"></text></g><g><title>clock_gettime (16 samples, 0.62%)</title><rect x="94.4145%" y="101" width="0.6163%" height="15" fill="rgb(205,98,50)" fg:x="2451" fg:w="16"/><text x="94.6645%" y="111.50"></text></g><g><title>__vdso_clock_gettime (6 samples, 0.23%)</title><rect x="94.7997%" y="85" width="0.2311%" height="15" fill="rgb(205,185,37)" fg:x="2461" fg:w="6"/><text x="95.0497%" y="95.50"></text></g><g><title>crossterm::event::read::InternalEventReader::poll (109 samples, 4.20%)</title><rect x="90.9091%" y="149" width="4.1988%" height="15" fill="rgb(238,207,15)" fg:x="2360" fg:w="109"/><text x="91.1591%" y="159.50">cross..</text></g><g><title>std::time::Instant::elapsed (20 samples, 0.77%)</title><rect x="94.3374%" y="133" width="0.7704%" height="15" fill="rgb(213,199,42)" fg:x="2449" fg:w="20"/><text x="94.5874%" y="143.50"></text></g><g><title>std::sys::pal::unix::time::Timespec::sub_timespec (2 samples, 0.08%)</title><rect x="95.0308%" y="117" width="0.0770%" height="15" fill="rgb(235,201,11)" fg:x="2467" fg:w="2"/><text x="95.2808%" y="127.50"></text></g><g><title>crossterm::event::timeout::PollTimeout::leftover (5 samples, 0.19%)</title><rect x="95.1079%" y="149" width="0.1926%" height="15" fill="rgb(207,46,11)" fg:x="2469" fg:w="5"/><text x="95.3579%" y="159.50"></text></g><g><title>std::time::Instant::elapsed (2 samples, 0.08%)</title><rect x="95.2234%" y="133" width="0.0770%" height="15" fill="rgb(241,35,35)" fg:x="2472" fg:w="2"/><text x="95.4734%" y="143.50"></text></g><g><title>std::sys::pal::unix::time::Timespec::now (2 samples, 0.08%)</title><rect x="95.2234%" y="117" width="0.0770%" height="15" fill="rgb(243,32,47)" fg:x="2472" fg:w="2"/><text x="95.4734%" y="127.50"></text></g><g><title>clock_gettime (2 samples, 0.08%)</title><rect x="95.2234%" y="101" width="0.0770%" height="15" fill="rgb(247,202,23)" fg:x="2472" fg:w="2"/><text x="95.4734%" y="111.50"></text></g><g><title>__vdso_clock_gettime (1 samples, 0.04%)</title><rect x="95.2619%" y="85" width="0.0385%" height="15" fill="rgb(219,102,11)" fg:x="2473" fg:w="1"/><text x="95.5119%" y="95.50"></text></g><g><title>crossterm::event::poll (127 samples, 4.89%)</title><rect x="90.7165%" y="165" width="4.8921%" height="15" fill="rgb(243,110,44)" fg:x="2355" fg:w="127"/><text x="90.9665%" y="175.50">crosst..</text></g><g><title>std::sys::pal::unix::time::Timespec::now (8 samples, 0.31%)</title><rect x="95.3005%" y="149" width="0.3082%" height="15" fill="rgb(222,74,54)" fg:x="2474" fg:w="8"/><text x="95.5505%" y="159.50"></text></g><g><title>clock_gettime (8 samples, 0.31%)</title><rect x="95.3005%" y="133" width="0.3082%" height="15" fill="rgb(216,99,12)" fg:x="2474" fg:w="8"/><text x="95.5505%" y="143.50"></text></g><g><title>__vdso_clock_gettime (3 samples, 0.12%)</title><rect x="95.4931%" y="117" width="0.1156%" height="15" fill="rgb(226,22,26)" fg:x="2479" fg:w="3"/><text x="95.7431%" y="127.50"></text></g><g><title>__close (3 samples, 0.12%)</title><rect x="95.6857%" y="117" width="0.1156%" height="15" fill="rgb(217,163,10)" fg:x="2484" fg:w="3"/><text x="95.9357%" y="127.50"></text></g><g><title>ioctl (5 samples, 0.19%)</title><rect x="95.8012%" y="117" width="0.1926%" height="15" fill="rgb(213,25,53)" fg:x="2487" fg:w="5"/><text x="96.0512%" y="127.50"></text></g><g><title>[libc.so.6] (12 samples, 0.46%)</title><rect x="96.1479%" y="101" width="0.4622%" height="15" fill="rgb(252,105,26)" fg:x="2496" fg:w="12"/><text x="96.3979%" y="111.50"></text></g><g><title>core::ffi::c_str::CStr::from_bytes_with_nul (6 samples, 0.23%)</title><rect x="96.6102%" y="101" width="0.2311%" height="15" fill="rgb(220,39,43)" fg:x="2508" fg:w="6"/><text x="96.8602%" y="111.50"></text></g><g><title>crossterm::terminal::size (61 samples, 2.35%)</title><rect x="95.6086%" y="165" width="2.3498%" height="15" fill="rgb(229,68,48)" fg:x="2482" fg:w="61"/><text x="95.8586%" y="175.50">c..</text></g><g><title>crossterm::terminal::sys::unix::size (61 samples, 2.35%)</title><rect x="95.6086%" y="149" width="2.3498%" height="15" fill="rgb(252,8,32)" fg:x="2482" fg:w="61"/><text x="95.8586%" y="159.50">c..</text></g><g><title>crossterm::terminal::sys::unix::window_size (60 samples, 2.31%)</title><rect x="95.6471%" y="133" width="2.3112%" height="15" fill="rgb(223,20,43)" fg:x="2483" fg:w="60"/><text x="95.8971%" y="143.50">c..</text></g><g><title>std::fs::OpenOptions::_open (51 samples, 1.96%)</title><rect x="95.9938%" y="117" width="1.9646%" height="15" fill="rgb(229,81,49)" fg:x="2492" fg:w="51"/><text x="96.2438%" y="127.50">s..</text></g><g><title>std::sys::pal::unix::fs::File::open_c (29 samples, 1.12%)</title><rect x="96.8413%" y="101" width="1.1171%" height="15" fill="rgb(236,28,36)" fg:x="2514" fg:w="29"/><text x="97.0913%" y="111.50"></text></g><g><title>open64 (19 samples, 0.73%)</title><rect x="97.2265%" y="85" width="0.7319%" height="15" fill="rgb(249,185,26)" fg:x="2524" fg:w="19"/><text x="97.4765%" y="95.50"></text></g><g><title>roundf32x (5 samples, 0.19%)</title><rect x="97.9584%" y="165" width="0.1926%" height="15" fill="rgb(249,174,33)" fg:x="2543" fg:w="5"/><text x="98.2084%" y="175.50"></text></g><g><title>_start (1,904 samples, 73.34%)</title><rect x="25.3082%" y="293" width="73.3436%" height="15" fill="rgb(233,201,37)" fg:x="657" fg:w="1904"/><text x="25.5582%" y="303.50">_start</text></g><g><title>__libc_start_main (1,904 samples, 73.34%)</title><rect x="25.3082%" y="277" width="73.3436%" height="15" fill="rgb(221,78,26)" fg:x="657" fg:w="1904"/><text x="25.5582%" y="287.50">__libc_start_main</text></g><g><title>[libc.so.6] (1,904 samples, 73.34%)</title><rect x="25.3082%" y="261" width="73.3436%" height="15" fill="rgb(250,127,30)" fg:x="657" fg:w="1904"/><text x="25.5582%" y="271.50">[libc.so.6]</text></g><g><title>main (1,904 samples, 73.34%)</title><rect x="25.3082%" y="245" width="73.3436%" height="15" fill="rgb(230,49,44)" fg:x="657" fg:w="1904"/><text x="25.5582%" y="255.50">main</text></g><g><title>std::rt::lang_start_internal (1,904 samples, 73.34%)</title><rect x="25.3082%" y="229" width="73.3436%" height="15" fill="rgb(229,67,23)" fg:x="657" fg:w="1904"/><text x="25.5582%" y="239.50">std::rt::lang_start_internal</text></g><g><title>_ZN3std2rt10lang_start28_$u7b$$u7b$closure$u7d$$u7d$17he7ed07e42ecaacf9E.llvm.14796134226882227835 (1,904 samples, 73.34%)</title><rect x="25.3082%" y="213" width="73.3436%" height="15" fill="rgb(249,83,47)" fg:x="657" fg:w="1904"/><text x="25.5582%" y="223.50">_ZN3std2rt10lang_start28_$u7b$$u7b$closure$u7d$$u7d$17he7ed07e42ecaacf9E.llvm.14796134226882227835</text></g><g><title>std::sys_common::backtrace::__rust_begin_short_backtrace (1,904 samples, 73.34%)</title><rect x="25.3082%" y="197" width="73.3436%" height="15" fill="rgb(215,43,3)" fg:x="657" fg:w="1904"/><text x="25.5582%" y="207.50">std::sys_common::backtrace::__rust_begin_short_backtrace</text></g><g><title>pendulum::main (1,904 samples, 73.34%)</title><rect x="25.3082%" y="181" width="73.3436%" height="15" fill="rgb(238,154,13)" fg:x="657" fg:w="1904"/><text x="25.5582%" y="191.50">pendulum::main</text></g><g><title>std::io::stdio::stdout (13 samples, 0.50%)</title><rect x="98.1510%" y="165" width="0.5008%" height="15" fill="rgb(219,56,2)" fg:x="2548" fg:w="13"/><text x="98.4010%" y="175.50"></text></g><g><title>core::fmt::num::imp::&lt;impl core::fmt::Display for u16&gt;::fmt (1 samples, 0.04%)</title><rect x="98.6518%" y="293" width="0.0385%" height="15" fill="rgb(233,0,4)" fg:x="2561" fg:w="1"/><text x="98.9018%" y="303.50"></text></g><g><title>core::fmt::write (18 samples, 0.69%)</title><rect x="98.6903%" y="293" width="0.6934%" height="15" fill="rgb(235,30,7)" fg:x="2562" fg:w="18"/><text x="98.9403%" y="303.50"></text></g><g><title>&lt;str as core::fmt::Display&gt;::fmt (5 samples, 0.19%)</title><rect x="99.1911%" y="277" width="0.1926%" height="15" fill="rgb(250,79,13)" fg:x="2575" fg:w="5"/><text x="99.4411%" y="287.50"></text></g><g><title>core::slice::memchr::memrchr (1 samples, 0.04%)</title><rect x="99.3837%" y="293" width="0.0385%" height="15" fill="rgb(211,146,34)" fg:x="2580" fg:w="1"/><text x="99.6337%" y="303.50"></text></g><g><title>epoll_wait (7 samples, 0.27%)</title><rect x="99.4222%" y="293" width="0.2696%" height="15" fill="rgb(228,22,38)" fg:x="2581" fg:w="7"/><text x="99.6722%" y="303.50"></text></g><g><title>std::time::Instant::elapsed (3 samples, 0.12%)</title><rect x="99.6918%" y="293" width="0.1156%" height="15" fill="rgb(235,168,5)" fg:x="2588" fg:w="3"/><text x="99.9418%" y="303.50"></text></g><g><title>all (2,596 samples, 100%)</title><rect x="0.0000%" y="325" width="100.0000%" height="15" fill="rgb(221,155,16)" fg:x="0" fg:w="2596"/><text x="0.2500%" y="335.50"></text></g><g><title>pendulum (2,596 samples, 100.00%)</title><rect x="0.0000%" y="309" width="100.0000%" height="15" fill="rgb(215,215,53)" fg:x="0" fg:w="2596"/><text x="0.2500%" y="319.50">pendulum</text></g><g><title>write (5 samples, 0.19%)</title><rect x="99.8074%" y="293" width="0.1926%" height="15" fill="rgb(223,4,10)" fg:x="2591" fg:w="5"/><text x="100.0574%" y="303.50"></text></g></svg></svg>
