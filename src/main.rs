@@ -2,10 +2,15 @@ use crossterm::{
     cursor::MoveTo,
     event::{poll, read, Event, KeyCode},
     execute,
-    style::{PrintStyledContent, Stylize},
+    style::{Color, Print, PrintStyledContent, SetForegroundColor, Stylize},
     terminal::{enable_raw_mode, size, Clear, EnterAlternateScreen},
 };
-use std::{io::stdout, ops::Div, time::Duration};
+use std::{
+    f64::consts::PI,
+    io::stdout,
+    ops::{Div, Mul, Sub},
+    time::Duration,
+};
 
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -16,7 +21,7 @@ struct Params {
     dt: f64,
     margin: i16,
     n: usize,
-    s: usize,
+    sel: usize,
     paused: bool,
 }
 
@@ -31,17 +36,17 @@ fn main() -> Result {
     let mut _i = 0;
     let mut center = (size.0 / 2, size.1 / 2);
     let mut pendulum = Pendulum {
-        thetas: vec![1.0; 1],
-        vels: vec![1000.0; 1],
+        thetas: vec![0.4; 1],
+        vels: vec![0.00; 1],
     };
     let params = Params {
         lengths: vec![1.0; 10],
         masses: vec![1.0; 10],
         gravity: -9.81,
         dt: 0.001,
-        margin: 30,
+        margin: 50,
         n: 1,
-        s: 0,
+        sel: 0,
         paused: false,
     };
     loop {
@@ -71,16 +76,13 @@ fn main() -> Result {
         single_pendulum(&mut pendulum, &params);
         let (x, y) = calc_coords(vec![params.lengths[0]], vec![pendulum.thetas[0]], params.n);
         let (new_x, new_y) = rescaled_coords(x, y, 2.0, get_dimensions(5)?);
-        execute!(
-            stdout(),
-            Clear(crossterm::terminal::ClearType::All),
-            MoveTo(new_x, new_y),
-            PrintStyledContent("█".magenta())
-        )?;
+        execute!(stdout(), Clear(crossterm::terminal::ClearType::All))?;
         draw_line(
             (center.0 as i16, center.1 as i16),
             (new_x as i16, new_y as i16),
+            Color::Magenta,
         );
+        draw_circle((new_x, new_y), 2, Color::Red);
         _i += 1
     }
     Ok(())
@@ -103,12 +105,53 @@ fn calc_coords(l: Vec<f64>, theta: Vec<f64>, n: usize) -> (f64, f64) {
     (x, y)
 }
 
-//TODO draw_circle
-
 //TODO draw_pendulum
 // passes in a pendulum, with an optional selected N, and a length, draws lines between origin and pendulums until it meows
 
-fn draw_line((mut x1, mut y1): (i16, i16), (x2, y2): (i16, i16)) {
+/// doesn't fully fill circle, should not be used
+fn draw_circle_filled((x, y): (u16, u16), r: u16, color: Color) {
+    for i in 0..r {
+        draw_circle((x, y), i, color);
+    }
+}
+
+///  this function draws a circle, based on the midpoint circle algorithm, not optimal, and has a limitation of the circle having a radius lower than 10 for unforeseen reason
+fn draw_circle((x, y): (u16, u16), r: u16, color: Color) {
+    let mut sx: i16 = 0;
+    let mut sy = r as i16;
+    let mut p = 3 - 2 * r as i16;
+    while sx <= sy {
+        plot_point(sx + x as i16, sy + y as i16, color);
+        plot_point(-sx + x as i16, sy + y as i16, color);
+        plot_point(sx + x as i16, -sy + y as i16, color);
+        plot_point(-sx + x as i16, -sy + y as i16, color);
+        plot_point(sy + x as i16, sx + y as i16, color);
+        plot_point(-sy + x as i16, sx + y as i16, color);
+        plot_point(sy + x as i16, -sx + y as i16, color);
+        plot_point(-sy + x as i16, -sx + y as i16, color);
+        sx += 1;
+        if p > 0 {
+            sy -= 1;
+            p += 4 * (sx - sy) + 10;
+        } else {
+            p += 4 * sx + 6;
+        }
+    }
+}
+
+/// wrapper function for crossterm execute, as execute is not very pretty
+fn plot_point(x: i16, y: i16, color: Color) {
+    execute!(
+        stdout(),
+        MoveTo(x as u16, y as u16),
+        SetForegroundColor(color),
+        Print("█")
+    )
+    .unwrap();
+}
+
+/// based on bresenhams line algorithm,draws a line between two points
+fn draw_line((mut x1, mut y1): (i16, i16), (x2, y2): (i16, i16), color: Color) {
     let dx = (x2 - x1).abs();
     let sx = if x1 < x2 { 1 } else { -1 };
     let dy = -(y2 - y1).abs();
@@ -116,12 +159,7 @@ fn draw_line((mut x1, mut y1): (i16, i16), (x2, y2): (i16, i16)) {
     let mut error = dx + dy;
     // mwa ha ha ha while true loop being used in an algorithm!!!!
     loop {
-        execute!(
-            stdout(),
-            MoveTo(x1 as u16, y1 as u16),
-            PrintStyledContent("█".magenta())
-        )
-        .unwrap();
+        plot_point(x1, y1, color);
         if x1 == x2 && y1 == y2 {
             break;
         }
@@ -143,12 +181,13 @@ fn draw_line((mut x1, mut y1): (i16, i16), (x2, y2): (i16, i16)) {
     }
 }
 
+/// returns the dimension
 fn get_dimensions(margin: i16) -> Result<i16> {
     let (x, y) = size()?;
-    let dimensions = if x < y {
-        x as i16 - margin.div(2)
+    let dimensions = if x * 2 < y {
+        (x as i16) * 2 - margin.mul(2)
     } else {
-        y as i16 - margin.div(2)
+        y as i16 - margin.mul(2)
     };
     Ok(dimensions)
 }
