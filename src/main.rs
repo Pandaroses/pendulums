@@ -2,18 +2,14 @@ use crossterm::{
     cursor::MoveTo,
     event::{poll, read, Event, KeyCode},
     execute,
-    style::{Color, Print, PrintStyledContent, SetForegroundColor, Stylize},
+    style::{Color, Print, SetForegroundColor},
     terminal::{enable_raw_mode, size, Clear, EnterAlternateScreen},
 };
-use std::{
-    f64::consts::PI,
-    io::stdout,
-    ops::{Div, Mul, Sub},
-    time::Duration,
-};
+use std::{io::stdout, ops::Mul, time::Duration};
 
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+#[derive(Debug)]
 struct Params {
     lengths: Vec<f64>,
     // mass will be from 0-10 when adjusting, in factors of 1, fuck knows why its a f64
@@ -26,26 +22,28 @@ struct Params {
     paused: bool,
 }
 
+#[derive(Debug)]
 struct Pendulum {
     thetas: Vec<f64>,
     vels: Vec<f64>,
 }
 fn main() -> Result {
-    let mut size: (u16, u16) = size().unwrap();
+    let size: (u16, u16) = size().unwrap();
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen)?;
     let mut _i = 0;
     let mut center = (size.0 / 2, size.1 / 2);
+    // TODO meow
     let mut pendulum = Pendulum {
         thetas: vec![1.0; 1],
-        vels: vec![0.00; 1],
+        vels: vec![0.0; 1],
     };
     let params = Params {
-        lengths: vec![10.0; 1],
-        masses: vec![3.0; 1],
+        lengths: vec![5.0; 1],
+        masses: vec![1.0; 1],
         gravity: -9.81,
-        dt: 0.001,
-        margin: 5,
+        dt: 0.01,
+        margin: 15,
         n: 1,
         sel: 0,
         paused: false,
@@ -103,7 +101,7 @@ fn calc_coords(l: &Vec<f64>, theta: &Vec<f64>, n: usize) -> (f64, f64) {
 // passes in a pendulum, with an optional selected N, and a length, draws lines between origin and pendulums until it meows
 fn draw_pendulum(pendulum: &Pendulum, params: &Params, (mut px, mut py): (u16, u16)) {
     for i in 0..params.n {
-        let (ix, iy) = calc_coords(&params.lengths, &pendulum.thetas, i);
+        let (ix, iy) = calc_coords(&params.lengths, &pendulum.thetas, i + 1);
         let (x, y) = rescaled_coords(
             ix,
             iy,
@@ -115,7 +113,8 @@ fn draw_pendulum(pendulum: &Pendulum, params: &Params, (mut px, mut py): (u16, u
         } else {
             Color::Blue
         };
-        draw_circle((x, y), params.masses[i].round() as u16, color);
+        // add back mass size
+        draw_circle((x, y), 2 as u16, color);
         draw_line((px as i16, py as i16), (x as i16, y as i16), Color::White);
         (px, py) = (x, y);
     }
