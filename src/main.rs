@@ -16,6 +16,7 @@ type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 struct Params {
     lengths: Vec<f64>,
+    // mass will be from 0-10 when adjusting, in factors of 1, fuck knows why its a f64
     masses: Vec<f64>,
     gravity: f64,
     dt: f64,
@@ -36,15 +37,15 @@ fn main() -> Result {
     let mut _i = 0;
     let mut center = (size.0 / 2, size.1 / 2);
     let mut pendulum = Pendulum {
-        thetas: vec![0.4; 1],
+        thetas: vec![1.0; 1],
         vels: vec![0.00; 1],
     };
     let params = Params {
-        lengths: vec![1.0; 10],
-        masses: vec![1.0; 10],
+        lengths: vec![10.0; 1],
+        masses: vec![3.0; 1],
         gravity: -9.81,
         dt: 0.001,
-        margin: 50,
+        margin: 5,
         n: 1,
         sel: 0,
         paused: false,
@@ -74,15 +75,8 @@ fn main() -> Result {
         //todo instead of single pedulum calculations inside of main, instead make generalized n-ulum function & draw-pendulum function
         // they need to be INDEPENDENT, because if its paused, calculation shouldn't run, but pendulum should still be modifiable
         single_pendulum(&mut pendulum, &params);
-        let (x, y) = calc_coords(vec![params.lengths[0]], vec![pendulum.thetas[0]], params.n);
-        let (new_x, new_y) = rescaled_coords(x, y, 2.0, get_dimensions(5)?);
+        draw_pendulum(&pendulum, &params, center);
         execute!(stdout(), Clear(crossterm::terminal::ClearType::All))?;
-        draw_line(
-            (center.0 as i16, center.1 as i16),
-            (new_x as i16, new_y as i16),
-            Color::Magenta,
-        );
-        draw_circle((new_x, new_y), 2, Color::Red);
         _i += 1
     }
     Ok(())
@@ -95,7 +89,7 @@ fn single_pendulum(pendulum: &mut Pendulum, params: &Params) {
         (params.gravity / params.lengths[0]) * f64::sin(pendulum.thetas[0]) * params.dt;
 }
 
-fn calc_coords(l: Vec<f64>, theta: Vec<f64>, n: usize) -> (f64, f64) {
+fn calc_coords(l: &Vec<f64>, theta: &Vec<f64>, n: usize) -> (f64, f64) {
     let mut x = 0.0;
     let mut y = 0.0;
     for i in 0..n {
@@ -107,11 +101,23 @@ fn calc_coords(l: Vec<f64>, theta: Vec<f64>, n: usize) -> (f64, f64) {
 
 //TODO draw_pendulum
 // passes in a pendulum, with an optional selected N, and a length, draws lines between origin and pendulums until it meows
-
-/// doesn't fully fill circle, should not be used
-fn draw_circle_filled((x, y): (u16, u16), r: u16, color: Color) {
-    for i in 0..r {
-        draw_circle((x, y), i, color);
+fn draw_pendulum(pendulum: &Pendulum, params: &Params, (mut px, mut py): (u16, u16)) {
+    for i in 0..params.n {
+        let (ix, iy) = calc_coords(&params.lengths, &pendulum.thetas, i);
+        let (x, y) = rescaled_coords(
+            ix,
+            iy,
+            params.lengths.iter().sum(),
+            get_dimensions(params.margin).unwrap(),
+        );
+        let color = if i == params.sel {
+            Color::Red
+        } else {
+            Color::Blue
+        };
+        draw_circle((x, y), params.masses[i].round() as u16, color);
+        draw_line((px as i16, py as i16), (x as i16, y as i16), Color::White);
+        (px, py) = (x, y);
     }
 }
 
