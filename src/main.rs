@@ -1,9 +1,9 @@
 use crossterm::{
-    cursor::MoveTo,
+    cursor::{self, MoveTo},
     event::{poll, read, Event, KeyCode},
     execute,
     style::{Color, Print, SetForegroundColor},
-    terminal::{enable_raw_mode, size, Clear, EnterAlternateScreen},
+    terminal::{enable_raw_mode, size, Clear, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use std::{io::stdout, ops::Mul, time::Duration};
 
@@ -48,6 +48,7 @@ fn main() -> Result {
         sel: 0,
         paused: false,
     };
+    execute!(stdout(), cursor::Hide)?;
     loop {
         if (poll(Duration::from_millis((1000.0 * params.dt).round() as u64)))? {
             let event = read()?;
@@ -59,6 +60,12 @@ fn main() -> Result {
                 // play/pause: can be implemented with simple if statement
                 Event::Key(e) => {
                     if let KeyCode::Esc = e.code {
+                        execute!(
+                            stdout(),
+                            Clear(crossterm::terminal::ClearType::All),
+                            cursor::Show,
+                            LeaveAlternateScreen
+                        )?;
                         break;
                     }
                 }
@@ -72,9 +79,9 @@ fn main() -> Result {
 
         //todo instead of single pedulum calculations inside of main, instead make generalized n-ulum function & draw-pendulum function
         // they need to be INDEPENDENT, because if its paused, calculation shouldn't run, but pendulum should still be modifiable
+        execute!(stdout(), Clear(crossterm::terminal::ClearType::All))?;
         single_pendulum(&mut pendulum, &params);
         draw_pendulum(&pendulum, &params, center);
-        execute!(stdout(), Clear(crossterm::terminal::ClearType::All))?;
         _i += 1
     }
     Ok(())
@@ -190,7 +197,7 @@ fn draw_line((mut x1, mut y1): (i16, i16), (x2, y2): (i16, i16), color: Color) {
 fn get_dimensions(margin: i16) -> Result<i16> {
     let (x, y) = size()?;
     let dimensions = if x * 2 < y {
-        (x as i16) * 2 - margin.mul(2)
+        (x as i16) / 2 - margin.mul(2)
     } else {
         y as i16 - margin.mul(2)
     };
