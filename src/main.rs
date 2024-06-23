@@ -94,6 +94,22 @@ fn single_pendulum(pendulum: &mut Pendulum, params: &Params) {
         (params.gravity / params.lengths[0]) * f64::sin(pendulum.thetas[0]) * params.dt;
 }
 
+fn rho(j: i32, k: i32) -> i32 {
+    if j > k {
+        0
+    } else {
+        1
+    }
+}
+
+fn phi(j: i32, k: i32) -> i32 {
+    if j == k {
+        0
+    } else {
+        1
+    }
+}
+
 fn calc_coords(l: &Vec<f64>, theta: &Vec<f64>, n: usize) -> (f64, f64) {
     let mut x = 0.0;
     let mut y = 0.0;
