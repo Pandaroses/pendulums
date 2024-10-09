@@ -6,7 +6,6 @@ use crossterm::{
     terminal::{enable_raw_mode, size, Clear, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use std::{io::stdout, ops::Mul, time::Duration};
-
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Debug)]
@@ -26,6 +25,7 @@ struct Params {
 struct Pendulum {
     thetas: Vec<f64>,
     vels: Vec<f64>,
+    n: u64,
 }
 fn main() -> Result {
     let size: (u16, u16) = size().unwrap();
@@ -37,6 +37,7 @@ fn main() -> Result {
     let mut pendulum = Pendulum {
         thetas: vec![1.0; 1],
         vels: vec![0.0; 1],
+        n: 4,
     };
     let params = Params {
         lengths: vec![5.0; 1],
@@ -48,6 +49,7 @@ fn main() -> Result {
         sel: 0,
         paused: false,
     };
+
     execute!(stdout(), cursor::Hide)?;
     loop {
         if (poll(Duration::from_millis((1000.0 * params.dt).round() as u64)))? {
@@ -92,22 +94,6 @@ fn single_pendulum(pendulum: &mut Pendulum, params: &Params) {
     pendulum.thetas[0] += pendulum.vels[0] * params.dt;
     pendulum.vels[0] -=
         (params.gravity / params.lengths[0]) * f64::sin(pendulum.thetas[0]) * params.dt;
-}
-
-fn rho(j: i32, k: i32) -> i32 {
-    if j > k {
-        0
-    } else {
-        1
-    }
-}
-
-fn phi(j: i32, k: i32) -> i32 {
-    if j == k {
-        0
-    } else {
-        1
-    }
 }
 
 fn calc_coords(l: &Vec<f64>, theta: &Vec<f64>, n: usize) -> (f64, f64) {
@@ -225,4 +211,43 @@ fn rescaled_coords(x: f64, y: f64, starting_max: f64, output_max: i16) -> (u16, 
     let o = (((x / starting_max) * output_max as f64).round() as i16 + (m / 2) as i16) as u16;
     let w = (((y / starting_max) * output_max as f64).round() as i16 + (e / 2) as i16) as u16;
     (o, w)
+}
+
+impl Pendulum {
+    pub fn A(&self) -> Vec<Vec<f64>> {
+        let mut m = Vec::new();
+        for i in 0..self.n {
+            let mut row = Vec::new();
+            for j in 0..self.n {
+                row.push(
+                    (self.n - i.max(j)) as f64
+                        * f64::cos(self.thetas[i as usize] - self.thetas[j as usize]),
+                );
+            }
+            m.push(row);
+        }
+        m
+    }
+    pub fn b(&self, config: Params) -> Vec<f64> {
+        let mut v = Vec::new();
+        for i in 0..self.n as usize {
+            let mut b_i = 0.0;
+            for j in 0..self.n as usize {
+                b_i -= (self.n - i.max(j) as u64) as f64
+                    * f64::sin(self.thetas[i as usize] - self.thetas[j] * self.vels[j]).powi(2);
+            }
+            b_i -= config.gravity as f64
+                * (self.n - i as u64) as f64
+                * f64::sin(self.thetas[i as usize]);
+            v.push(b_i);
+        }
+        v
+    }
+    pub fn f(&self, config: Params) {
+        let a = self.A();
+        let b = self.b(config);
+        [self.vels, a.solve_into(b)]
+    }
+    pub fn RK4() {}
+    pub fn next() {}
 }
